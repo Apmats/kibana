@@ -16,4 +16,5 @@ export const INCLUDED_OPERATIONS = [
   'indices.create',
   'bulk',
   'esql.query',
+  'ingest.simulate',
 ];
