@@ -13,9 +13,11 @@ import type { AuthorizationServiceSetup } from '@kbn/security-plugin-types-serve
 import type {
   SmlService,
   SmlSearchResult,
+  SmlAutocompleteResult,
   SmlDocument,
   SmlTypeDefinition,
   SmlSearchFilters,
+  MatchedDiscoveryLabel,
 } from './types';
 import { createSmlTypeRegistry, type SmlTypeRegistry } from './sml_type_registry';
 import { createSmlIndexer, type SmlIndexer } from './sml_indexer';
@@ -98,6 +100,21 @@ class SmlServiceImpl implements SmlServiceInstance {
           logger,
         });
       },
+      autocomplete: async ({ query, size = 10, spaceId, esClient, request }) => {
+        const rawResults = await autocompleteSml({
+          query,
+          size,
+          spaceId,
+          esClient,
+          logger,
+        });
+        return filterResultsByPermissions({
+          searchResult: rawResults,
+          request,
+          securityAuthz: this.securityAuthz,
+          logger,
+        });
+      },
       checkItemsAccess: async ({ ids, spaceId, esClient, request }) => {
         return checkItemsAccess({
           ids,
@@ -171,18 +188,20 @@ const getAuthorizedPermissions = async ({
  * 1. Collect all unique permission strings from the results.
  * 2. Batch-check them with the security plugin.
  * 3. Remove results whose required permissions are not fully authorized.
+ *
+ * Generic over the result type so both `search` and `autocomplete` paths share it.
  */
-const filterResultsByPermissions = async ({
+const filterResultsByPermissions = async <T extends { permissions: string[] }>({
   searchResult,
   request,
   securityAuthz,
   logger,
 }: {
-  searchResult: { results: SmlSearchResult[]; total: number };
+  searchResult: { results: T[]; total: number };
   request: KibanaRequest;
   securityAuthz?: AuthorizationServiceSetup;
   logger: Logger;
-}): Promise<{ results: SmlSearchResult[]; total: number }> => {
+}): Promise<{ results: T[]; total: number }> => {
   // When the security plugin is absent (e.g. development/testing with security
   // disabled), all results are returned unfiltered. This follows the standard
   // Kibana convention: no security plugin → open access.
@@ -313,23 +332,15 @@ const checkItemsAccess = async ({
   return accessMap;
 };
 
-const SML_SEARCH_AS_YOU_TYPE_FIELDS = [
-  'title_autocomplete',
-  'title_autocomplete._2gram', // Combination of two words
-  'title_autocomplete._3gram', // Combination of three words
-  'title_autocomplete._index_prefix',
-  'type.autocomplete',
-  'type.autocomplete._index_prefix',
-] as const;
-
 /**
- * Build the search query from a single string. `title_autocomplete` and `type.autocomplete`
- * (search_as_you_type) drive prefix matching via bool_prefix; `title`, `description`, and
- * `content` (text) contribute BM25; `unified_semantic` (a single semantic_text field that
+ * Build the search query from a single string. `title`, `description`, and `content`
+ * (text) contribute BM25; `unified_semantic` (a single semantic_text field that
  * copy_to-aggregates `title`, `description`, and `content`) drives vector retrieval.
  *
- * Search-API follow-up will refine this — splitting autocomplete from full retrieval,
- * adding field weighting, etc.
+ * Prefix typeahead / autocomplete is handled by a separate query path
+ * ({@link buildSmlAutocompleteQuery}) on a dedicated route.
+ *
+ * Search-API follow-up will refine this — field weighting, hybrid scoring tuning, etc.
  *
  * After trim: empty string or `*` → `match_all` (return everything).
  */
@@ -341,13 +352,6 @@ const buildSmlSearchQuery = (query: string): Record<string, unknown> => {
   return {
     bool: {
       should: [
-        {
-          multi_match: {
-            query: trimmed,
-            type: 'bool_prefix',
-            fields: [...SML_SEARCH_AS_YOU_TYPE_FIELDS],
-          },
-        },
         { match: { title: trimmed } },
         { match: { description: trimmed } },
         { match: { content: trimmed } },
@@ -489,6 +493,7 @@ const searchSml = async ({
           content: source.content,
           description: source.description,
           tags: source.tags,
+          discovery_labels: source.discovery_labels,
           payload: source.payload,
           references: source.references,
           created_at: source.created_at ?? '',
@@ -509,6 +514,193 @@ const searchSml = async ({
       return { results: [], total: 0 };
     }
     logger.warn(`SML search failed: ${(error as Error).message}`);
+    throw error;
+  }
+};
+
+/**
+ * Build the autocomplete query: a single nested prefix query against
+ * `discovery_labels.value.autocomplete` with `inner_hits` to surface which
+ * entries matched (with their `kind`). Title and type are reachable through
+ * this surface because the indexer auto-prepends them to `discovery_labels`.
+ *
+ * After trim: empty string or `*` → `match_all`.
+ */
+/**
+ * Pick a highlight snippet from ES's per-subfield highlight object.
+ * Returns the first non-empty snippet; absent if none.
+ */
+const pickHighlightSnippet = (
+  highlight: Record<string, string[]> | undefined
+): string | undefined => {
+  if (!highlight) return undefined;
+  for (const snippets of Object.values(highlight)) {
+    if (snippets && snippets.length > 0) {
+      return snippets[0];
+    }
+  }
+  return undefined;
+};
+
+const buildSmlAutocompleteQuery = (query: string): Record<string, unknown> => {
+  const trimmed = query.trim();
+  if (trimmed === '' || trimmed === '*') {
+    return { match_all: {} };
+  }
+  // The autocomplete surface is unified: title and type are auto-prepended to
+  // every record's `discovery_labels` at index time, so a single nested query
+  // against `discovery_labels.value.autocomplete` covers title, type, and any
+  // producer-provided labels (taglines, nicknames, categories, etc.).
+  //
+  // The `.autocomplete` field uses a custom edge-ngram analyzer (defined in
+  // `sml_storage.ts`): each indexed word becomes its edge-ngrams, and the search
+  // analyzer tokenizes the user's typed query as plain terms. A typed "git"
+  // matches the indexed ngram "git" within "github" — and because edge-ngrams
+  // preserve each word's original offsets, the highlighter wraps the matched
+  // word (e.g. `<em>GitHub</em> Connector`) cleanly.
+  //
+  // `operator: and` means every token the user typed must match — typeahead-
+  // friendly: typing more chars narrows results.
+  return {
+    nested: {
+      path: 'discovery_labels',
+      query: {
+        match: {
+          'discovery_labels.value.autocomplete': {
+            query: trimmed,
+            operator: 'and',
+          },
+        },
+      },
+      inner_hits: {
+        _source: ['discovery_labels.value', 'discovery_labels.kind'],
+        size: 10,
+        highlight: {
+          type: 'unified',
+          number_of_fragments: 0,
+          pre_tags: ['<em>'],
+          post_tags: ['</em>'],
+          fields: {
+            'discovery_labels.value.autocomplete': {},
+          },
+        },
+      },
+    },
+  };
+};
+
+/**
+ * Autocomplete the SML index. Prefix-only, with per-row provenance for the @ menu.
+ */
+const autocompleteSml = async ({
+  query,
+  size,
+  spaceId,
+  esClient,
+  logger,
+}: {
+  query: string;
+  size: number;
+  spaceId: string;
+  esClient: IScopedClusterClient;
+  logger: Logger;
+}): Promise<{ results: SmlAutocompleteResult[]; total: number }> => {
+  logger.debug(
+    `SML autocomplete: query=${JSON.stringify(
+      query
+    )}, size=${size}, spaceId='${spaceId}', index='${smlIndexName}'`
+  );
+
+  try {
+    const smlQuery = buildSmlAutocompleteQuery(query);
+
+    const response = await esClient.asInternalUser.search<SmlDocument>({
+      index: smlIndexName,
+      size,
+      allow_no_indices: true,
+      ignore_unavailable: true,
+      query: {
+        bool: {
+          must: [smlQuery],
+          filter: [
+            {
+              bool: {
+                should: [{ term: { spaces: spaceId } }, { term: { spaces: '*' } }],
+                minimum_should_match: 1,
+              },
+            },
+          ],
+        },
+      },
+      _source: ['id', 'type', 'title', 'origin_id', 'spaces', 'permissions'],
+    });
+
+    const total =
+      typeof response.hits.total === 'number'
+        ? response.hits.total
+        : response.hits.total?.value ?? 0;
+
+    const results: SmlAutocompleteResult[] = response.hits.hits
+      .filter((hit) => hit._source != null)
+      .map((hit) => {
+        const source = hit._source!;
+        const result: SmlAutocompleteResult = {
+          id: source.id ?? '',
+          type: source.type ?? '',
+          title: source.title ?? '',
+          origin_id: source.origin_id ?? '',
+          spaces: source.spaces ?? [],
+          permissions: source.permissions ?? [],
+        };
+        // Inner hits from the nested discovery_labels query: the specific entries
+        // that matched, with their ES-generated highlight snippet wrapping the
+        // matched span(s) in <em>...</em>.
+        const innerHits = (
+          hit as {
+            inner_hits?: Record<
+              string,
+              {
+                hits: {
+                  hits: Array<{
+                    _source: { value?: string; kind?: string };
+                    highlight?: Record<string, string[]>;
+                  }>;
+                };
+              }
+            >;
+          }
+        ).inner_hits;
+        const labelHits = innerHits?.discovery_labels?.hits?.hits;
+        if (labelHits && labelHits.length > 0) {
+          const matched: MatchedDiscoveryLabel[] = labelHits
+            .filter((h) => h._source?.value != null && h._source?.kind != null)
+            .map((h) => {
+              const entry: MatchedDiscoveryLabel = {
+                value: h._source.value!,
+                kind: h._source.kind!,
+              };
+              const snippet = pickHighlightSnippet(h.highlight);
+              if (snippet) {
+                entry.highlighted = snippet;
+              }
+              return entry;
+            });
+          if (matched.length > 0) {
+            result.matched_discovery_labels = matched;
+          }
+        }
+        return result;
+      });
+
+    logger.debug(`SML autocomplete: returned ${results.length} result(s), total=${total}`);
+
+    return { results, total };
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      logger.debug('SML index does not exist yet — returning empty autocomplete results');
+      return { results: [], total: 0 };
+    }
+    logger.warn(`SML autocomplete failed: ${(error as Error).message}`);
     throw error;
   }
 };
@@ -570,6 +762,9 @@ const getDocumentsByIds = async ({
       }
       if (source.tags !== undefined) {
         doc.tags = source.tags;
+      }
+      if (source.discovery_labels !== undefined) {
+        doc.discovery_labels = source.discovery_labels;
       }
       if (source.payload !== undefined) {
         doc.payload = source.payload;

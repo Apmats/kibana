@@ -16,6 +16,7 @@ import type {
 import { registerFeatures } from './features';
 import { registerUISettings } from './ui_settings';
 import { registerSearchRoute } from './routes/search';
+import { registerAutocompleteRoute } from './routes/autocomplete';
 import { createSmlService, type SmlServiceInstance } from './services/sml/sml_service';
 import {
   registerSmlCrawlerTaskDefinition,
@@ -77,6 +78,12 @@ export class AgentContextLayerPlugin
 
     const router = coreSetup.http.createRouter();
     registerSearchRoute({
+      router,
+      coreSetup,
+      logger: this.logger,
+      getSmlService,
+    });
+    registerAutocompleteRoute({
       router,
       coreSetup,
       logger: this.logger,
