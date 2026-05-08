@@ -141,6 +141,14 @@ class SmlIndexerImpl implements SmlIndexer {
       if (chunk.tags !== undefined) {
         document.tags = chunk.tags;
       }
+      // Auto-prepend `title` and `type` as discovery_labels so the @ menu has a
+      // single uniform surface to query. Producer-provided labels (taglines,
+      // nicknames, categories, etc.) come after.
+      document.discovery_labels = [
+        { value: chunk.title, kind: 'title' },
+        { value: chunk.type, kind: 'type' },
+        ...(chunk.discovery_labels ?? []),
+      ];
       if (chunk.payload !== undefined) {
         document.payload = chunk.payload;
       }
