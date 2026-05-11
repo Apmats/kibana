@@ -17,14 +17,12 @@ const defaultMockResults = [
     origin_id: 'att-1',
     type: 'visualization',
     title: 'Pacific Sales',
-    matched_discovery_labels: [{ value: 'Pacific Sales', kind: 'title' }],
   },
   {
     id: 'chunk-2',
     origin_id: 'att-2',
     type: 'visualization',
     title: 'Atlantic Metrics',
-    matched_discovery_labels: [{ value: 'Atlantic Metrics', kind: 'title' }],
   },
 ];
 
@@ -79,7 +77,7 @@ describe('Sml', () => {
     expect(container.textContent).toContain('visualization/Atlantic Metrics');
   });
 
-  it('shows loading state when search is loading', () => {
+  it('shows loading state when autocomplete is loading', () => {
     mockUseSmlAutocompleteReturn = {
       results: [],
       total: 0,
