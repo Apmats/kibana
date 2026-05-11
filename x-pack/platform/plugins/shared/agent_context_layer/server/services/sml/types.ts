@@ -300,10 +300,13 @@ export interface SmlService {
   }) => Promise<{ results: SmlSearchResult[]; total: number }>;
 
   /**
-   * Autocomplete / typeahead against the SML index. Prefix-only against the
-   * search_as_you_type fields on `title` and `type`, plus a nested prefix query
-   * on `discovery_labels.value`. Returns per-row provenance for UI badges.
-   * Filters by space and permissions the same way as `search`.
+   * Autocomplete / typeahead against the SML index. A single nested
+   * `multi_match bool_prefix operator: and` against `discovery_labels.value`
+   * (search_as_you_type) and its `_2gram` / `_3gram` subfields. Returns per-row
+   * provenance for UI badges. Filters by space and permissions the same way
+   * as `search`, and accepts the same per-type `filters` (e.g. agent-centric
+   * connector allow-list) so consumers can use one filter builder for both
+   * routes.
    */
   autocomplete: (params: {
     query: string;
@@ -311,6 +314,8 @@ export interface SmlService {
     spaceId: string;
     esClient: IScopedClusterClient;
     request: KibanaRequest;
+    /** Per-type filters. See {@link SmlSearchFilters}. */
+    filters?: SmlSearchFilters;
   }) => Promise<{ results: SmlAutocompleteResult[]; total: number }>;
 
   /**
