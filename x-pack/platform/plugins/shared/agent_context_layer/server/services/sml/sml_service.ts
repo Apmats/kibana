@@ -100,13 +100,14 @@ class SmlServiceImpl implements SmlServiceInstance {
           logger,
         });
       },
-      autocomplete: async ({ query, size = 10, spaceId, esClient, request }) => {
+      autocomplete: async ({ query, size = 10, spaceId, esClient, request, filters }) => {
         const rawResults = await autocompleteSml({
           query,
           size,
           spaceId,
           esClient,
           logger,
+          filters,
         });
         return filterResultsByPermissions({
           searchResult: rawResults,
@@ -617,12 +618,14 @@ const autocompleteSml = async ({
   spaceId,
   esClient,
   logger,
+  filters,
 }: {
   query: string;
   size: number;
   spaceId: string;
   esClient: IScopedClusterClient;
   logger: Logger;
+  filters?: SmlSearchFilters;
 }): Promise<{ results: SmlAutocompleteResult[]; total: number }> => {
   logger.debug(
     `SML autocomplete: query=${JSON.stringify(
@@ -633,6 +636,19 @@ const autocompleteSml = async ({
   try {
     const smlQuery = buildSmlAutocompleteQuery(query);
 
+    const typeFilter = buildTypeFilters(filters);
+    const filterClauses: Array<Record<string, unknown>> = [
+      {
+        bool: {
+          should: [{ term: { spaces: spaceId } }, { term: { spaces: '*' } }],
+          minimum_should_match: 1,
+        },
+      },
+    ];
+    if (typeFilter) {
+      filterClauses.push(typeFilter);
+    }
+
     const response = await esClient.asInternalUser.search<SmlDocument>({
       index: smlIndexName,
       size,
@@ -641,14 +657,7 @@ const autocompleteSml = async ({
       query: {
         bool: {
           must: [smlQuery],
-          filter: [
-            {
-              bool: {
-                should: [{ term: { spaces: spaceId } }, { term: { spaces: '*' } }],
-                minimum_should_match: 1,
-              },
-            },
-          ],
+          filter: filterClauses,
         },
       },
       _source: ['id', 'type', 'title', 'origin_id', 'spaces', 'permissions'],

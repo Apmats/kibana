@@ -14,7 +14,10 @@ import type {
   SmlAutocompleteHttpResponse,
   SmlAutocompleteHttpResultItem,
 } from '../../common/http_api/sml';
-import { SML_HTTP_AUTOCOMPLETE_QUERY_MAX_LENGTH } from '../../common/http_api/sml';
+import {
+  SML_HTTP_AUTOCOMPLETE_QUERY_MAX_LENGTH,
+  SmlSearchFilterType,
+} from '../../common/http_api/sml';
 import { smlAutocompletePath } from '../../common/constants';
 import type { SmlService } from '../services/sml/types';
 import type { AgentContextLayerStartDependencies, AgentContextLayerPluginStart } from '../types';
@@ -43,6 +46,17 @@ export const registerAutocompleteRoute = ({
         body: schema.object({
           query: schema.string({ minLength: 1, maxLength: SML_HTTP_AUTOCOMPLETE_QUERY_MAX_LENGTH }),
           size: schema.maybe(schema.number({ min: 1, max: SML_AUTOCOMPLETE_SIZE_MAX })),
+          // Per-type scoping (e.g. agent-centric connector allow-list). Same
+          // shape as POST /sml/_search so a single FE filter-builder can feed
+          // either route.
+          filters: schema.maybe(
+            schema.recordOf(
+              schema.literal(SmlSearchFilterType.connector),
+              schema.object({
+                ids: schema.maybe(schema.arrayOf(schema.string(), { maxSize: 100 })),
+              })
+            )
+          ),
         }),
       },
       options: { access: 'internal' },
@@ -61,7 +75,7 @@ export const registerAutocompleteRoute = ({
         }
 
         const sml = getSmlService();
-        const { query, size } = request.body;
+        const { query, size, filters } = request.body;
         const esClient = coreContext.elasticsearch.client;
 
         const [, startDeps] = await coreSetup.getStartServices();
@@ -73,6 +87,7 @@ export const registerAutocompleteRoute = ({
           spaceId,
           esClient,
           request,
+          filters,
         });
 
         const body: SmlAutocompleteHttpResponse = {

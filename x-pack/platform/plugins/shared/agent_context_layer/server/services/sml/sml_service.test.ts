@@ -10,6 +10,7 @@ import { loggerMock } from '@kbn/logging-mocks';
 import type { ElasticsearchClient, IScopedClusterClient } from '@kbn/core-elasticsearch-server';
 import type { KibanaRequest } from '@kbn/core-http-server';
 import type { AuthorizationServiceSetup } from '@kbn/security-plugin-types-server';
+import { SmlSearchFilterType } from '../../../common/http_api/sml';
 import { createSmlService, isNotFoundError } from './sml_service';
 import { smlIndexName } from './sml_storage';
 import type { SmlTypeDefinition } from './types';
@@ -730,6 +731,44 @@ describe('SmlService', () => {
 
       const call = esClient.search.mock.calls[0]![0]!;
       expect(call.query!.bool!.must).toEqual([{ match_all: {} }]);
+    });
+
+    it('threads per-type filters through buildTypeFilters into the ES filter clauses', async () => {
+      const service = createSmlService();
+      service.setup({ logger });
+      const smlService = service.start({ logger });
+
+      esClient.search.mockResolvedValue({ hits: { total: 0, hits: [] } } as any);
+
+      await smlService.autocomplete({
+        query: 'git',
+        size: 10,
+        spaceId: 'default',
+        esClient: scopedClient,
+        request,
+        filters: { [SmlSearchFilterType.connector]: { ids: ['gh-1', 'jira-1'] } },
+      });
+
+      const call = esClient.search.mock.calls[0]![0]!;
+      const filterClauses = call.query!.bool!.filter as Array<Record<string, unknown>>;
+      // First clause is the space filter; second is the type filter from buildTypeFilters.
+      expect(filterClauses).toHaveLength(2);
+      expect(filterClauses[1]).toEqual({
+        bool: {
+          should: [
+            {
+              bool: {
+                must: [
+                  { term: { type: 'connector' } },
+                  { terms: { origin_id: ['gh-1', 'jira-1'] } },
+                ],
+              },
+            },
+            { bool: { must_not: [{ term: { type: 'connector' } }] } },
+          ],
+          minimum_should_match: 1,
+        },
+      });
     });
 
     it('maps inner_hits onto matched_discovery_labels', async () => {
