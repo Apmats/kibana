@@ -198,7 +198,7 @@ export default function ({ getService }: FtrProviderContext) {
         }
       });
 
-      it('matches a short prefix against the auto-prepended title label and highlights it', async () => {
+      it('matches a short prefix against the auto-prepended title label', async () => {
         const response = await supertest
           .post('/internal/agent_context_layer/sml/_autocomplete')
           .set('kbn-xsrf', 'kibana')
@@ -216,9 +216,11 @@ export default function ({ getService }: FtrProviderContext) {
         const titleLabel = match!.matched_discovery_labels?.find((l) => l.kind === 'title');
         expect(titleLabel).to.be.ok();
         expect(titleLabel!.value).to.be(titleValue);
-        // ES highlight wraps the matched word in <em>...</em>
-        expect(titleLabel!.highlighted).to.contain('<em>');
-        expect(titleLabel!.highlighted).to.contain('</em>');
+        // `highlighted` is omitted here because SAYT + bool_prefix + nested
+        // inner_hits doesn't return useful highlight snippets in current ES
+        // (bug elastic/elasticsearch#53744). The route is forward-compatible:
+        // UI handles `highlighted` when present, plain `value` otherwise.
+        expect(titleLabel!.highlighted).to.be(undefined);
       });
 
       it('matches a producer-supplied tagline label and surfaces its kind', async () => {
@@ -235,7 +237,7 @@ export default function ({ getService }: FtrProviderContext) {
         const taglineLabel = match!.matched_discovery_labels?.find((l) => l.kind === 'tagline');
         expect(taglineLabel).to.be.ok();
         expect(taglineLabel!.value).to.be(taglineValue);
-        expect(taglineLabel!.highlighted).to.contain('<em>');
+        expect(taglineLabel!.highlighted).to.be(undefined);
       });
 
       it('matches a prefix of the auto-prepended type label', async () => {

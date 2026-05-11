@@ -672,11 +672,15 @@ describe('SmlService', () => {
               nested: {
                 path: 'discovery_labels',
                 query: {
-                  match: {
-                    'discovery_labels.value.autocomplete': {
-                      query: 'git',
-                      operator: 'and',
-                    },
+                  multi_match: {
+                    query: 'git',
+                    type: 'bool_prefix',
+                    operator: 'and',
+                    fields: [
+                      'discovery_labels.value',
+                      'discovery_labels.value._2gram',
+                      'discovery_labels.value._3gram',
+                    ],
                   },
                 },
                 inner_hits: {
@@ -687,8 +691,9 @@ describe('SmlService', () => {
                     number_of_fragments: 0,
                     pre_tags: ['<em>'],
                     post_tags: ['</em>'],
+                    encoder: 'html',
                     fields: {
-                      'discovery_labels.value.autocomplete': {},
+                      'discovery_labels.value': {},
                     },
                   },
                 },
@@ -756,7 +761,7 @@ describe('SmlService', () => {
                         _score: 5.4,
                         _source: { value: 'GitHub Connector', kind: 'title' },
                         highlight: {
-                          'discovery_labels.value.autocomplete': ['<em>GitHub</em> Connector'],
+                          'discovery_labels.value': ['<em>GitHub</em> Connector'],
                         },
                       },
                       {
@@ -764,7 +769,7 @@ describe('SmlService', () => {
                         _score: 4.1,
                         _source: { value: 'github', kind: 'tagline' },
                         highlight: {
-                          'discovery_labels.value.autocomplete': ['<em>github</em>'],
+                          'discovery_labels.value': ['<em>github</em>'],
                         },
                       },
                     ],
