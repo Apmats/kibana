@@ -519,14 +519,6 @@ const searchSml = async ({
 };
 
 /**
- * Build the autocomplete query: a single nested prefix query against
- * `discovery_labels.value.autocomplete` with `inner_hits` to surface which
- * entries matched (with their `kind`). Title and type are reachable through
- * this surface because the indexer auto-prepends them to `discovery_labels`.
- *
- * After trim: empty string or `*` → `match_all`.
- */
-/**
  * Pick a highlight snippet from ES's per-subfield highlight object.
  * Returns the first non-empty snippet; absent if none.
  */
@@ -542,34 +534,50 @@ const pickHighlightSnippet = (
   return undefined;
 };
 
+/**
+ * Build the autocomplete query: a single nested `multi_match bool_prefix` against
+ * `discovery_labels.value` (SAYT) and its auto-generated `_2gram` / `_3gram`
+ * subfields, with `inner_hits` to surface which entries matched (with their
+ * `kind`). Title and type are reachable through this surface because the
+ * indexer auto-prepends them to `discovery_labels`.
+ *
+ * `bool_prefix` is SAYT's native query type: all-but-last analyzed tokens are
+ * required to match as exact indexed terms (against the bigram/trigram shingle
+ * subfields), and the last token is required to match as a prefix (against
+ * `_index_prefix`). With `operator: and` every typed token must contribute —
+ * including the trailing partial. This yields tight per-token semantics:
+ * `"github c"` matches `"GitHub Connector"` but not `"Githubster Cup"`
+ * (because `"github"` is not an indexed token of `"Githubster"`).
+ *
+ * Known limitation: ES does not produce useful highlight snippets for
+ * SAYT + `bool_prefix` + nested + inner_hits (bug
+ * elastic/elasticsearch#53744, open since 2020). The highlight config below
+ * is retained so the route is forward-compatible once the bug is fixed; until
+ * then, `matched_discovery_labels` entries are returned without `highlighted`
+ * and the UI renders plain `value`. See PR description for the trade-off vs
+ * the earlier custom edge_ngram approach (working highlights but looser
+ * matching) and the hybrid AND alternative.
+ *
+ * After trim: empty string or `*` → `match_all`.
+ */
 const buildSmlAutocompleteQuery = (query: string): Record<string, unknown> => {
   const trimmed = query.trim();
   if (trimmed === '' || trimmed === '*') {
     return { match_all: {} };
   }
-  // The autocomplete surface is unified: title and type are auto-prepended to
-  // every record's `discovery_labels` at index time, so a single nested query
-  // against `discovery_labels.value.autocomplete` covers title, type, and any
-  // producer-provided labels (taglines, nicknames, categories, etc.).
-  //
-  // The `.autocomplete` field uses a custom edge-ngram analyzer (defined in
-  // `sml_storage.ts`): each indexed word becomes its edge-ngrams, and the search
-  // analyzer tokenizes the user's typed query as plain terms. A typed "git"
-  // matches the indexed ngram "git" within "github" — and because edge-ngrams
-  // preserve each word's original offsets, the highlighter wraps the matched
-  // word (e.g. `<em>GitHub</em> Connector`) cleanly.
-  //
-  // `operator: and` means every token the user typed must match — typeahead-
-  // friendly: typing more chars narrows results.
   return {
     nested: {
       path: 'discovery_labels',
       query: {
-        match: {
-          'discovery_labels.value.autocomplete': {
-            query: trimmed,
-            operator: 'and',
-          },
+        multi_match: {
+          query: trimmed,
+          type: 'bool_prefix',
+          operator: 'and',
+          fields: [
+            'discovery_labels.value',
+            'discovery_labels.value._2gram',
+            'discovery_labels.value._3gram',
+          ],
         },
       },
       inner_hits: {
@@ -580,8 +588,12 @@ const buildSmlAutocompleteQuery = (query: string): Record<string, unknown> => {
           number_of_fragments: 0,
           pre_tags: ['<em>'],
           post_tags: ['</em>'],
+          // HTML-encode the source text so literal `<`/`>`/`&` in user content
+          // don't collide with the `<em>` wrappers when rendered. No-op while
+          // #53744 keeps SAYT+nested highlight broken; correct once it lands.
+          encoder: 'html',
           fields: {
-            'discovery_labels.value.autocomplete': {},
+            'discovery_labels.value': {},
           },
         },
       },

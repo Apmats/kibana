@@ -48,8 +48,9 @@ export interface SmlChunk {
    * Categorical / nickname terms that make this record discoverable beyond `type`
    * and `title`. Each label carries a `kind` so the UI can render it appropriately
    * (e.g. as a tagline, nickname, category, or synonym). Indexed as a nested field;
-   * the autocomplete surface queries `discovery_labels.value.autocomplete` and uses
-   * `inner_hits` to surface which entry matched.
+   * the autocomplete surface queries `discovery_labels.value` (SAYT) with
+   * `multi_match bool_prefix` and uses `inner_hits` to surface which entry
+   * matched.
    *
    * Example for a GitHub connector:
    *   [
