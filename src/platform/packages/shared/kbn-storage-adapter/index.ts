@@ -15,7 +15,6 @@ import type {
   GetResponse,
   IndexRequest,
   IndexResponse,
-  IndicesIndexSettingsAnalysis,
   Result,
   SearchRequest,
 } from '@elastic/elasticsearch/lib/api/types';
@@ -46,15 +45,6 @@ interface StorageSettingsBase {
 
 export interface IndexStorageSettings extends StorageSettingsBase {
   name: string;
-  /**
-   * Optional custom analyzers / token filters / etc. — merged into the index
-   * template's `settings.analysis` block at template-creation time. Use for
-   * features like custom edge-ngram analyzers when the built-in field types
-   * (`search_as_you_type`, etc.) aren't a fit.
-   *
-   * Ignored on serverless ES, which doesn't accept index-level settings.
-   */
-  analysis?: IndicesIndexSettingsAnalysis;
 }
 
 export type StorageSettings = IndexStorageSettings;
