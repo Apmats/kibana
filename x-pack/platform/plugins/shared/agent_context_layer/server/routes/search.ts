@@ -10,13 +10,14 @@ import type { CoreSetup, IRouter, Logger } from '@kbn/core/server';
 import type { RouteSecurity } from '@kbn/core-http-server';
 import { AGENT_CONTEXT_LAYER_EXPERIMENTAL_FEATURES_SETTING_ID } from '@kbn/management-settings-ids';
 import { apiPrivileges } from '../../common/features';
-import type { SmlSearchHttpResponse } from '../../common/http_api/sml';
+import type { SmlSearchHttpResponse, SmlSearchHttpResultItem } from '../../common/http_api/sml';
 import { SML_HTTP_SEARCH_QUERY_MAX_LENGTH, SmlSearchFilterType } from '../../common/http_api/sml';
 import { smlSearchPath } from '../../common/constants';
 import type { SmlService } from '../services/sml/types';
 import type { AgentContextLayerStartDependencies, AgentContextLayerPluginStart } from '../types';
 
 const SML_SEARCH_SIZE_MAX = 1000;
+const SML_SEARCH_FILTER_ARRAY_MAX = 100;
 
 const AGENT_CONTEXT_LAYER_READ_SECURITY: RouteSecurity = {
   authz: { requiredPrivileges: [apiPrivileges.readAgentContextLayer] },
@@ -40,14 +41,31 @@ export const registerSearchRoute = ({
         body: schema.object({
           query: schema.string({ minLength: 1, maxLength: SML_HTTP_SEARCH_QUERY_MAX_LENGTH }),
           size: schema.maybe(schema.number({ min: 1, max: SML_SEARCH_SIZE_MAX })),
-          skip_content: schema.maybe(schema.boolean()),
-          filters: schema.maybe(
+          // Runtime-imposed per-type id-allowlist (e.g. agent-centric connector
+          // allow-list). Sean Story's PR #267333 originally landed this as
+          // `filters`; renamed to `scoping` to make the trust boundary
+          // explicit alongside the new agent-discoverable `filters`.
+          scoping: schema.maybe(
             schema.recordOf(
               schema.literal(SmlSearchFilterType.connector),
               schema.object({
-                ids: schema.maybe(schema.arrayOf(schema.string(), { maxSize: 100 })),
+                ids: schema.maybe(
+                  schema.arrayOf(schema.string(), { maxSize: SML_SEARCH_FILTER_ARRAY_MAX })
+                ),
               })
             )
+          ),
+          // Agent-discoverable filters: refinements the LLM tool path supplies.
+          // ANDed with `scoping`; agent filters cannot widen runtime scope.
+          filters: schema.maybe(
+            schema.object({
+              types: schema.maybe(
+                schema.arrayOf(schema.string(), { maxSize: SML_SEARCH_FILTER_ARRAY_MAX })
+              ),
+              tags: schema.maybe(
+                schema.arrayOf(schema.string(), { maxSize: SML_SEARCH_FILTER_ARRAY_MAX })
+              ),
+            })
           ),
         }),
       },
@@ -67,7 +85,7 @@ export const registerSearchRoute = ({
         }
 
         const sml = getSmlService();
-        const { query, size, skip_content: skipContent, filters } = request.body;
+        const { query, size, scoping, filters } = request.body;
         const esClient = coreContext.elasticsearch.client;
 
         const [, startDeps] = await coreSetup.getStartServices();
@@ -79,20 +97,26 @@ export const registerSearchRoute = ({
           spaceId,
           esClient,
           request,
-          skipContent,
+          scoping,
           filters,
         });
 
         const body: SmlSearchHttpResponse = {
           total,
-          results: results.map(({ id, type, origin_id, title, score, content }) => ({
-            id,
-            type,
-            origin_id,
-            title,
-            score,
-            ...(skipContent ? {} : { content }),
-          })),
+          results: results.map((hit) => {
+            const item: SmlSearchHttpResultItem = {
+              id: hit.id,
+              type: hit.type,
+              origin_id: hit.origin_id,
+              title: hit.title,
+              score: hit.score,
+            };
+            if (hit.description !== undefined) item.description = hit.description;
+            if (hit.references !== undefined) item.references = hit.references;
+            if (hit.tags !== undefined) item.tags = hit.tags;
+            if (hit.more_content !== undefined) item.more_content = hit.more_content;
+            return item;
+          }),
         };
 
         return response.ok({ body });

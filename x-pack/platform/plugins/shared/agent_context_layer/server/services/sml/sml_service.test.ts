@@ -168,16 +168,13 @@ describe('SmlService', () => {
   });
 
   describe('search', () => {
-    it('calls ES search with correct retriever, space filter, and _source fields', async () => {
+    it('issues an RRF retriever (BM25 + semantic fields) with space filter and compact _source', async () => {
       const service = createSmlService();
       service.setup({ logger });
       const smlService = service.start({ logger });
 
       esClient.search.mockResolvedValue({
-        hits: {
-          total: 0,
-          hits: [],
-        },
+        hits: { total: 0, hits: [] },
       } as any);
 
       await smlService.search({
@@ -225,29 +222,9 @@ describe('SmlService', () => {
           ],
         },
       });
-      expect(call._source).toEqual(true);
-    });
-
-    it('uses _source excludes when skipContent is true', async () => {
-      const service = createSmlService();
-      service.setup({ logger });
-      const smlService = service.start({ logger });
-
-      esClient.search.mockResolvedValue({
-        hits: { total: 0, hits: [] },
-      } as any);
-
-      await smlService.search({
-        query: 'viz',
-        size: 10,
-        spaceId: 'default',
-        esClient: scopedClient,
-        request,
-        skipContent: true,
+      expect(call._source).toEqual({
+        includes: ['id', 'type', 'title', 'origin_id', 'description', 'tags', 'references', 'spaces', 'permissions', 'content'],
       });
-
-      const call = esClient.search.mock.calls[0]![0]!;
-      expect(call._source).toEqual({ excludes: ['content', 'description'] });
     });
 
     it('uses match_all for query "*"', async () => {
@@ -268,9 +245,21 @@ describe('SmlService', () => {
       });
 
       const call = esClient.search.mock.calls[0]![0]! as {
-        query?: { bool?: { must?: unknown[] } };
+        retriever?: unknown;
+        query?: { bool?: { must?: unknown[]; filter?: unknown[] } };
       };
+      // Empty / `*` query falls back to a match_all + filter query (no retriever
+      // signal to combine).
+      expect(call.retriever).toBeUndefined();
       expect(call.query!.bool!.must).toEqual([{ match_all: {} }]);
+      expect(call.query!.bool!.filter).toEqual([
+        {
+          bool: {
+            should: [{ term: { spaces: 'default' } }, { term: { spaces: '*' } }],
+            minimum_should_match: 1,
+          },
+        },
+      ]);
     });
 
     it('uses match_all for empty query after trim', async () => {
@@ -291,12 +280,88 @@ describe('SmlService', () => {
       });
 
       const call = esClient.search.mock.calls[0]![0]! as {
+        retriever?: unknown;
         query?: { bool?: { must?: unknown[] } };
       };
+      expect(call.retriever).toBeUndefined();
       expect(call.query!.bool!.must).toEqual([{ match_all: {} }]);
     });
 
-    it('maps response to SmlSearchResult', async () => {
+    it('threads scoping and agent filters into the RRF-level filter', async () => {
+      const service = createSmlService();
+      service.setup({ logger });
+      const smlService = service.start({ logger });
+
+      esClient.search.mockResolvedValue({ hits: { total: 0, hits: [] } } as any);
+
+      await smlService.search({
+        query: 'github',
+        size: 10,
+        spaceId: 'default',
+        esClient: scopedClient,
+        request,
+        scoping: { [SmlSearchFilterType.connector]: { ids: ['gh-1'] } },
+        filters: { types: ['connector', 'dashboard'], tags: ['production'] },
+      });
+
+      const call = esClient.search.mock.calls[0]![0]! as {
+        retriever?: { rrf?: { filter?: unknown[] } };
+      };
+      const filterClauses = call.retriever!.rrf!.filter as Array<Record<string, unknown>>;
+      expect(filterClauses).toHaveLength(4);
+      // Space clause.
+      expect(filterClauses[0]).toEqual({
+        bool: {
+          should: [{ term: { spaces: 'default' } }, { term: { spaces: '*' } }],
+          minimum_should_match: 1,
+        },
+      });
+      // Scoping clause (per-type id-allowlist).
+      expect(filterClauses[1]).toEqual({
+        bool: {
+          should: [
+            {
+              bool: {
+                must: [{ term: { type: 'connector' } }, { terms: { origin_id: ['gh-1'] } }],
+              },
+            },
+            { bool: { must_not: [{ term: { type: 'connector' } }] } },
+          ],
+          minimum_should_match: 1,
+        },
+      });
+      // Agent filters: terms on `type` and `tags`.
+      expect(filterClauses[2]).toEqual({ terms: { type: ['connector', 'dashboard'] } });
+      expect(filterClauses[3]).toEqual({ terms: { tags: ['production'] } });
+    });
+
+    it('passes the query string to the semantic fields via rrf.query + rrf.fields', async () => {
+      const service = createSmlService();
+      service.setup({ logger });
+      const smlService = service.start({ logger });
+
+      esClient.search.mockResolvedValue({ hits: { total: 0, hits: [] } } as any);
+
+      await smlService.search({
+        query: 'how is the fleet performing this quarter',
+        size: 10,
+        spaceId: 'default',
+        esClient: scopedClient,
+        request,
+      });
+
+      const call = esClient.search.mock.calls[0]![0]! as {
+        retriever?: { rrf?: { query?: string; fields?: string[] } };
+      };
+      expect(call.retriever!.rrf!.query).toBe('how is the fleet performing this quarter');
+      expect(call.retriever!.rrf!.fields).toEqual([
+        'title_semantic',
+        'description_semantic',
+        'content_semantic',
+      ]);
+    });
+
+    it('maps response to the compact SmlSearchResult shape (no content blob, more_content set)', async () => {
       const service = createSmlService();
       service.setup({ logger });
       const smlService = service.start({ logger });
@@ -311,12 +376,11 @@ describe('SmlService', () => {
                 type: 'lens',
                 title: 'My Viz',
                 origin_id: 'ref-1',
+                // `content` is fetched as a length proxy for more_content but
+                // intentionally dropped from the returned result.
                 content: 'content text',
                 description: 'A lens viz',
-                user_id: 'user-1',
                 references: ['lens:other:uuid'],
-                created_at: '2024-01-01',
-                updated_at: '2024-01-02',
                 spaces: ['default'],
                 permissions: ['saved_object:lens/get'],
               },
@@ -340,20 +404,53 @@ describe('SmlService', () => {
         type: 'lens',
         title: 'My Viz',
         origin_id: 'ref-1',
-        content: 'content text',
         description: 'A lens viz',
-        user_id: 'user-1',
         references: ['lens:other:uuid'],
-        created_at: '2024-01-01',
-        updated_at: '2024-01-02',
         spaces: ['default'],
         permissions: ['saved_object:lens/get'],
         score: 1.5,
+        more_content: true,
       });
+      expect(result.results[0]).not.toHaveProperty('content');
       expect(result.total).toBe(1);
     });
 
-    it('surfaces all new schema fields (origin, tags, discovery_labels, payload) in search results', async () => {
+    it('sets more_content=false when the indexed content is empty', async () => {
+      const service = createSmlService();
+      service.setup({ logger });
+      const smlService = service.start({ logger });
+
+      esClient.search.mockResolvedValue({
+        hits: {
+          total: 1,
+          hits: [
+            {
+              _source: {
+                id: 'chunk-bare',
+                type: 'connector',
+                title: 'Bare',
+                origin_id: 'b1',
+                content: '',
+                spaces: ['default'],
+                permissions: [],
+              },
+              _score: 1,
+            },
+          ],
+        },
+      } as any);
+
+      const result = await smlService.search({
+        query: '*',
+        size: 10,
+        spaceId: 'default',
+        esClient: scopedClient,
+        request,
+      });
+      expect(result.results[0].more_content).toBe(false);
+    });
+
+    it('surfaces description, tags, and references on hits (compact LLM shape)', async () => {
       const service = createSmlService();
       service.setup({ logger });
       const smlService = service.start({ logger });
@@ -371,12 +468,7 @@ describe('SmlService', () => {
                 content: 'sales content',
                 description: 'sales summary',
                 tags: ['sales', 'executive'],
-                discovery_labels: [{ value: 'q3 sales', kind: 'tagline' }],
-                payload: { owner_team: 'sales-ops' },
-                user_id: 'user-7',
                 references: ['category://sales'],
-                created_at: '2026-04-01T00:00:00.000Z',
-                updated_at: '2026-04-02T00:00:00.000Z',
                 spaces: ['default'],
                 permissions: ['saved_object:dashboard/get'],
               },
@@ -400,18 +492,13 @@ describe('SmlService', () => {
         type: 'dashboard',
         title: 'Sales Q3',
         origin_id: 'dash-100',
-        content: 'sales content',
         description: 'sales summary',
         tags: ['sales', 'executive'],
-        discovery_labels: [{ value: 'q3 sales', kind: 'tagline' }],
-        payload: { owner_team: 'sales-ops' },
-        user_id: 'user-7',
         references: ['category://sales'],
-        created_at: '2026-04-01T00:00:00.000Z',
-        updated_at: '2026-04-02T00:00:00.000Z',
         spaces: ['default'],
         permissions: ['saved_object:dashboard/get'],
         score: 2.5,
+        more_content: true,
       });
     });
 
@@ -566,7 +653,10 @@ describe('SmlService', () => {
       expect(result.results).toHaveLength(1);
       expect(result.results[0].id).toBe('chunk-1');
       expect(result.results[0].type).toBe('lens');
-      expect(result.total).toBe(1);
+      // `total` reflects ES hits.total.value (pre-permission-filter); post-hoc
+      // permission filtering removed `chunk-2` from `results` but does NOT
+      // overwrite total to `results.length`.
+      expect(result.total).toBe(2);
     });
 
     it('returns all results when securityAuthz is absent', async () => {
@@ -733,7 +823,7 @@ describe('SmlService', () => {
       expect(call.query!.bool!.must).toEqual([{ match_all: {} }]);
     });
 
-    it('threads per-type filters through buildTypeFilters into the ES filter clauses', async () => {
+    it('threads per-type scoping through buildScopingFilter into the ES filter clauses', async () => {
       const service = createSmlService();
       service.setup({ logger });
       const smlService = service.start({ logger });
@@ -746,12 +836,12 @@ describe('SmlService', () => {
         spaceId: 'default',
         esClient: scopedClient,
         request,
-        filters: { [SmlSearchFilterType.connector]: { ids: ['gh-1', 'jira-1'] } },
+        scoping: { [SmlSearchFilterType.connector]: { ids: ['gh-1', 'jira-1'] } },
       });
 
       const call = esClient.search.mock.calls[0]![0]!;
       const filterClauses = call.query!.bool!.filter as Array<Record<string, unknown>>;
-      // First clause is the space filter; second is the type filter from buildTypeFilters.
+      // First clause is the space filter; second is the scoping filter.
       expect(filterClauses).toHaveLength(2);
       expect(filterClauses[1]).toEqual({
         bool: {

@@ -17,6 +17,7 @@ import type {
   SmlDocument,
   SmlTypeDefinition,
   SmlSearchFilters,
+  SmlSearchScoping,
   MatchedDiscoveryLabel,
 } from './types';
 import { createSmlTypeRegistry, type SmlTypeRegistry } from './sml_type_registry';
@@ -83,14 +84,14 @@ class SmlServiceImpl implements SmlServiceInstance {
 
     return {
       getCrawler: () => crawler,
-      search: async ({ query, size = 10, spaceId, esClient, request, skipContent, filters }) => {
+      search: async ({ query, size = 10, spaceId, esClient, request, scoping, filters }) => {
         const rawResults = await searchSml({
           query,
           size,
           spaceId,
           esClient,
           logger,
-          skipContent,
+          scoping,
           filters,
         });
         return filterResultsByPermissions({
@@ -100,14 +101,14 @@ class SmlServiceImpl implements SmlServiceInstance {
           logger,
         });
       },
-      autocomplete: async ({ query, size = 10, spaceId, esClient, request, filters }) => {
+      autocomplete: async ({ query, size = 10, spaceId, esClient, request, scoping }) => {
         const rawResults = await autocompleteSml({
           query,
           size,
           spaceId,
           esClient,
           logger,
-          filters,
+          scoping,
         });
         return filterResultsByPermissions({
           searchResult: rawResults,
@@ -190,7 +191,10 @@ const getAuthorizedPermissions = async ({
  * 2. Batch-check them with the security plugin.
  * 3. Remove results whose required permissions are not fully authorized.
  *
- * Generic over the result type so both `search` and `autocomplete` paths share it.
+ * Generic over the result type so both `search` and `autocomplete` paths share
+ * it. `total` reflects the underlying ES match count and is preserved across
+ * permission filtering — the post-filter `results.length` is a lower bound,
+ * not a hit count.
  */
 const filterResultsByPermissions = async <T extends { permissions: string[] }>({
   searchResult,
@@ -228,7 +232,7 @@ const filterResultsByPermissions = async <T extends { permissions: string[] }>({
     return hit.permissions.every((p) => authorizedPerms.has(p));
   });
 
-  return { results: filteredResults, total: filteredResults.length };
+  return { results: filteredResults, total: searchResult.total };
 };
 
 /**
@@ -338,22 +342,78 @@ const SML_SEMANTIC_FIELDS = ['title_semantic', 'description_semantic', 'content_
 const SML_BM25_TEXT_FIELDS = ['title^2', 'description', 'content'] as const;
 
 /**
- * Build an ES filter clause from per-type SML search filters.
+ * Build the search retriever body for the natural-language path.
+ *
+ * Non-empty queries: RRF combining BM25 (`best_fields` over title/description/content)
+ * with semantic retrieval across `title_semantic`, `description_semantic`, and
+ * `content_semantic` via the RRF retriever's `query`/`fields` parameters.
+ * Filters are applied at the RRF level so every sub-retriever sees the same scope.
+ *
+ * Empty string or `*`: falls back to a `match_all` query (no retrieval signal).
+ */
+const buildSmlSearchBody = ({
+  query,
+  filterClauses,
+}: {
+  query: string;
+  filterClauses: Array<Record<string, unknown>>;
+}): Record<string, unknown> => {
+  const trimmed = query.trim();
+  if (trimmed === '' || trimmed === '*') {
+    return {
+      query: {
+        bool: {
+          must: [{ match_all: {} }],
+          filter: filterClauses,
+        },
+      },
+    };
+  }
+
+  return {
+    retriever: {
+      rrf: {
+        query: trimmed,
+        fields: [...SML_SEMANTIC_FIELDS],
+        retrievers: [
+          {
+            standard: {
+              query: {
+                multi_match: {
+                  query: trimmed,
+                  type: 'best_fields',
+                  fields: [...SML_BM25_TEXT_FIELDS],
+                },
+              },
+            },
+          },
+        ],
+        filter: filterClauses,
+      },
+    },
+  };
+};
+
+/**
+ * Build an ES filter clause from runtime-imposed per-type scoping.
  *
  * For each type with an `ids` constraint, the filter returns documents that
  * either (a) match the type AND have an origin_id in the list, or (b) are
- * NOT of the constrained type. Types without filters are unaffected.
+ * NOT of the constrained type. Types without scoping are unaffected.
+ *
+ * Renamed from `buildTypeFilters` to reflect the trust-boundary split between
+ * runtime-imposed scope and agent-discoverable filters.
  */
-export const buildTypeFilters = (
-  filters: SmlSearchFilters | undefined
+export const buildScopingFilter = (
+  scoping: SmlSearchScoping | undefined
 ): Record<string, unknown> | undefined => {
-  if (!filters) {
+  if (!scoping) {
     return undefined;
   }
 
   const clauses: Array<Record<string, unknown>> = [];
 
-  for (const [typeId, criteria] of Object.entries(filters)) {
+  for (const [typeId, criteria] of Object.entries(scoping)) {
     if (!criteria?.ids) {
       continue;
     }
@@ -395,13 +455,41 @@ export const buildTypeFilters = (
 };
 
 /**
- * Search the SML index. When the index hasn't been created yet,
- * the function returns empty results silently.
+ * Build ES filter clauses from agent-discoverable filters (`types[]`,
+ * `tags[]`). Each dimension lowers into a single `terms` clause; multiple
+ * dimensions AND together via inclusion in the outer `filter` list.
  *
- * Non-empty queries use the RRF retriever: the `rrf.query` + `rrf.fields` parameters
- * drive semantic retrieval across `title_semantic`, `description_semantic`, and
- * `content_semantic`; a `standard` sub-retriever handles BM25 + SAYT prefix matching.
- * Empty / `*` queries fall back to a plain `match_all`.
+ * Empty arrays are ignored (treated as "no constraint") — the agent has no
+ * way to express "exclude everything" and passing `[]` accidentally should
+ * be a no-op.
+ */
+export const buildAgentFilters = (
+  filters: SmlSearchFilters | undefined
+): Array<Record<string, unknown>> => {
+  if (!filters) {
+    return [];
+  }
+
+  const clauses: Array<Record<string, unknown>> = [];
+
+  if (filters.types && filters.types.length > 0) {
+    clauses.push({ terms: { type: filters.types } });
+  }
+
+  if (filters.tags && filters.tags.length > 0) {
+    clauses.push({ terms: { tags: filters.tags } });
+  }
+
+  return clauses;
+};
+
+/**
+ * Search the SML index with the hybrid RRF retriever. When the index hasn't
+ * been created yet, the function returns empty results silently.
+ *
+ * Filter composition: spaces (always) + scoping (runtime-imposed) + agent
+ * filters (caller refinement) — all ANDed. The agent's `filters` can only
+ * narrow the runtime-imposed `scoping`; it can't widen it.
  */
 const searchSml = async ({
   query,
@@ -409,7 +497,7 @@ const searchSml = async ({
   spaceId,
   esClient,
   logger,
-  skipContent,
+  scoping,
   filters,
 }: {
   query: string;
@@ -417,20 +505,18 @@ const searchSml = async ({
   spaceId: string;
   esClient: IScopedClusterClient;
   logger: Logger;
-  skipContent?: boolean;
+  scoping?: SmlSearchScoping;
   filters?: SmlSearchFilters;
 }): Promise<{ results: SmlSearchResult[]; total: number }> => {
   logger.debug(
     `SML search: query=${JSON.stringify(
       query
-    )}, size=${size}, spaceId='${spaceId}', index='${smlIndexName}'`
+    )}, size=${size}, spaceId='${spaceId}', index='${smlIndexName}', scoping=${
+      scoping ? JSON.stringify(scoping) : 'none'
+    }, filters=${filters ? JSON.stringify(filters) : 'none'}`
   );
 
   try {
-    const trimmed = query.trim();
-    const isMatchAll = trimmed === '' || trimmed === '*';
-
-    const typeFilter = buildTypeFilters(filters);
     const filterClauses: Array<Record<string, unknown>> = [
       {
         bool: {
@@ -439,49 +525,25 @@ const searchSml = async ({
         },
       },
     ];
-    if (typeFilter) {
-      filterClauses.push(typeFilter);
+    const scopingFilter = buildScopingFilter(scoping);
+    if (scopingFilter) {
+      filterClauses.push(scopingFilter);
+    }
+    for (const agentClause of buildAgentFilters(filters)) {
+      filterClauses.push(agentClause);
     }
 
-    const searchBody = isMatchAll
-      ? {
-          query: {
-            bool: {
-              must: [{ match_all: {} }],
-              filter: filterClauses,
-            },
-          },
-        }
-      : {
-          retriever: {
-            rrf: {
-              query: trimmed,
-              fields: [...SML_SEMANTIC_FIELDS],
-              retrievers: [
-                {
-                  standard: {
-                    query: {
-                      multi_match: {
-                        query: trimmed,
-                        type: 'best_fields' as const,
-                        fields: [...SML_BM25_TEXT_FIELDS],
-                      },
-                    },
-                  },
-                },
-              ],
-              filter: filterClauses,
-            },
-          },
-        };
+    const body = buildSmlSearchBody({ query, filterClauses });
 
     const response = await esClient.asInternalUser.search<SmlDocument>({
       index: smlIndexName,
       size,
       allow_no_indices: true,
       ignore_unavailable: true,
-      ...searchBody,
-      _source: skipContent ? { excludes: ['content', 'description'] } : true,
+      ...body,
+      _source: {
+        includes: ['id', 'type', 'title', 'origin_id', 'description', 'tags', 'references', 'spaces', 'permissions', 'content'],
+      },
     });
 
     const total =
@@ -493,24 +555,26 @@ const searchSml = async ({
       .filter((hit) => hit._source != null)
       .map((hit) => {
         const source = hit._source!;
-        return {
+        const result: SmlSearchResult = {
           id: source.id ?? '',
           type: source.type ?? '',
           title: source.title ?? '',
           origin_id: source.origin_id ?? '',
-          content: source.content,
-          description: source.description,
-          tags: source.tags,
-          discovery_labels: source.discovery_labels,
-          payload: source.payload,
-          references: source.references,
-          created_at: source.created_at ?? '',
-          updated_at: source.updated_at ?? '',
           spaces: source.spaces ?? [],
           permissions: source.permissions ?? [],
-          user_id: source.user_id,
           score: hit._score ?? 0,
+          more_content: Boolean(source.content && source.content.length > 0),
         };
+        if (source.description !== undefined) {
+          result.description = source.description;
+        }
+        if (source.tags !== undefined) {
+          result.tags = source.tags;
+        }
+        if (source.references !== undefined) {
+          result.references = source.references;
+        }
+        return result;
       });
 
     logger.debug(`SML search: returned ${results.length} result(s), total=${total}`);
@@ -616,14 +680,14 @@ const autocompleteSml = async ({
   spaceId,
   esClient,
   logger,
-  filters,
+  scoping,
 }: {
   query: string;
   size: number;
   spaceId: string;
   esClient: IScopedClusterClient;
   logger: Logger;
-  filters?: SmlSearchFilters;
+  scoping?: SmlSearchScoping;
 }): Promise<{ results: SmlAutocompleteResult[]; total: number }> => {
   logger.debug(
     `SML autocomplete: query=${JSON.stringify(
@@ -634,7 +698,7 @@ const autocompleteSml = async ({
   try {
     const smlQuery = buildSmlAutocompleteQuery(query);
 
-    const typeFilter = buildTypeFilters(filters);
+    const scopingFilter = buildScopingFilter(scoping);
     const filterClauses: Array<Record<string, unknown>> = [
       {
         bool: {
@@ -643,8 +707,8 @@ const autocompleteSml = async ({
         },
       },
     ];
-    if (typeFilter) {
-      filterClauses.push(typeFilter);
+    if (scopingFilter) {
+      filterClauses.push(scopingFilter);
     }
 
     const response = await esClient.asInternalUser.search<SmlDocument>({

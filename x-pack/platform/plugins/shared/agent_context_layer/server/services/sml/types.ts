@@ -13,7 +13,7 @@ import type {
 import type { Logger } from '@kbn/logging';
 import type { KibanaRequest } from '@kbn/core-http-server';
 import type { AttachmentInput } from '@kbn/agent-builder-common/attachments';
-import type { SmlSearchFilters } from '../../../common/http_api/sml';
+import type { SmlSearchFilters, SmlSearchScoping } from '../../../common/http_api/sml';
 
 /**
  * One entry in {@link SmlChunk.discovery_labels}. `value` is what the autocomplete
@@ -191,13 +191,30 @@ export interface SmlDocument {
 }
 
 /**
- * An SML search result — same fields as {@link SmlDocument} plus relevance score.
- * `content` and `description` are optional when excluded from `_source` (e.g. `skipContent`).
+ * Compact SML search result — LLM-shaped. Drops the full `content` blob, the
+ * full `payload`, and bookkeeping fields. Callers fetch full content via the
+ * lookup tool (`sml_read`) when they need it.
+ *
+ * `permissions` is retained here so callers (route / tool wrapper) can apply
+ * post-hoc authorization filtering; downstream consumers should not expose it
+ * in their response shape.
+ *
+ * `more_content` is `true` when the indexed record has non-empty `content`
+ * (so `sml_read` would return more than this result already exposes).
  */
-export type SmlSearchResult = Omit<SmlDocument, 'content'> & {
-  content?: string;
+export interface SmlSearchResult {
+  id: string;
+  type: string;
+  title: string;
+  origin_id: string;
+  description?: string;
+  references?: string[];
+  tags?: string[];
+  spaces: string[];
+  permissions: string[];
   score: number;
-};
+  more_content?: boolean;
+}
 
 /**
  * One `discovery_labels` nested entry that matched an autocomplete prefix query.
@@ -275,10 +292,10 @@ export interface SmlCrawler {
 }
 
 /**
- * Per-type filter parameters for SML search.
+ * Filter parameters for SML search.
  * Re-exported from the shared HTTP API types so server and client use a single definition.
  */
-export type { SmlSearchFilters } from '../../../common/http_api/sml';
+export type { SmlSearchFilters, SmlSearchScoping } from '../../../common/http_api/sml';
 
 /**
  * SML service interface — exposed on the plugin start contract.
@@ -286,16 +303,26 @@ export type { SmlSearchFilters } from '../../../common/http_api/sml';
 export interface SmlService {
   /** Get the crawler instance (for task manager integration) */
   getCrawler: () => SmlCrawler;
-  /** Search the SML index, filtering results by space and permissions */
+  /**
+   * Hybrid search the SML index (RRF over BM25 + semantic), filtering results
+   * by space, scoping, agent-supplied filters, and permissions.
+   *
+   * `scoping` and `filters` are kept as separate parameters so the trust
+   * boundary is visible at the API layer: `scoping` is runtime-imposed
+   * (wrapper-applied from caller context — agent SO `connector_ids`, future
+   * allowed-indices, RBAC) and the agent can't bypass it; `filters` is the
+   * agent-discoverable refinement (`types[]`, `tags[]`). Both are combined
+   * server-side; agent filters never widen the scope.
+   */
   search: (params: {
     query: string;
     size?: number;
     spaceId: string;
     esClient: IScopedClusterClient;
     request: KibanaRequest;
-    /** When true, Elasticsearch omits `content` from `_source` (smaller payloads for autocomplete). */
-    skipContent?: boolean;
-    /** Per-type filters. See {@link SmlSearchFilters}. */
+    /** Runtime-imposed per-type id-allowlist scoping. See {@link SmlSearchScoping}. */
+    scoping?: SmlSearchScoping;
+    /** Agent-discoverable filters. See {@link SmlSearchFilters}. */
     filters?: SmlSearchFilters;
   }) => Promise<{ results: SmlSearchResult[]; total: number }>;
 
@@ -304,9 +331,10 @@ export interface SmlService {
    * `multi_match bool_prefix operator: and` against `discovery_labels.value`
    * (search_as_you_type) and its `_2gram` / `_3gram` subfields. Returns per-row
    * provenance for UI badges. Filters by space and permissions the same way
-   * as `search`, and accepts the same per-type `filters` (e.g. agent-centric
-   * connector allow-list) so consumers can use one filter builder for both
-   * routes.
+   * as `search`, and accepts the same per-type `scoping` (e.g. agent-centric
+   * connector allow-list) so consumers can use one scope builder for both
+   * routes. Autocomplete has no `filters` parameter — there's no LLM in this
+   * path to refine the query.
    */
   autocomplete: (params: {
     query: string;
@@ -314,8 +342,8 @@ export interface SmlService {
     spaceId: string;
     esClient: IScopedClusterClient;
     request: KibanaRequest;
-    /** Per-type filters. See {@link SmlSearchFilters}. */
-    filters?: SmlSearchFilters;
+    /** Runtime-imposed per-type id-allowlist scoping. See {@link SmlSearchScoping}. */
+    scoping?: SmlSearchScoping;
   }) => Promise<{ results: SmlAutocompleteResult[]; total: number }>;
 
   /**

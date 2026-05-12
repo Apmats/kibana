@@ -10,12 +10,13 @@ import type {
   SmlAutocompleteHttpResponse,
   SmlSearchFilters,
   SmlSearchHttpResponse,
+  SmlSearchScoping,
 } from '@kbn/agent-context-layer-plugin/public';
 import { smlAutocompletePath, smlSearchPath } from '@kbn/agent-context-layer-plugin/public';
 
 /**
  * Browser client for SML.
- *   - `search(...)` → `/internal/agent_context_layer/sml/_search` (full retrieval)
+ *   - `search(...)` → `/internal/agent_context_layer/sml/_search` (hybrid retrieval)
  *   - `autocomplete(...)` → `/internal/agent_context_layer/sml/_autocomplete` (@ menu / typeahead)
  */
 export class SmlService {
@@ -28,14 +29,16 @@ export class SmlService {
   async search(params: {
     query: string;
     size: number;
-    skipContent?: boolean;
+    /** Runtime-imposed per-type id-allowlist scoping. */
+    scoping?: SmlSearchScoping;
+    /** Agent-discoverable filters (`types[]`, `tags[]`). */
     filters?: SmlSearchFilters;
   }): Promise<SmlSearchHttpResponse> {
     return await this.http.post<SmlSearchHttpResponse>(smlSearchPath, {
       body: JSON.stringify({
         query: params.query,
         size: params.size,
-        ...(params.skipContent === true ? { skip_content: true } : {}),
+        ...(params.scoping ? { scoping: params.scoping } : {}),
         ...(params.filters ? { filters: params.filters } : {}),
       }),
     });
@@ -44,13 +47,14 @@ export class SmlService {
   async autocomplete(params: {
     query: string;
     size: number;
-    filters?: SmlSearchFilters;
+    /** Runtime-imposed per-type id-allowlist scoping. */
+    scoping?: SmlSearchScoping;
   }): Promise<SmlAutocompleteHttpResponse> {
     return await this.http.post<SmlAutocompleteHttpResponse>(smlAutocompletePath, {
       body: JSON.stringify({
         query: params.query,
         size: params.size,
-        ...(params.filters ? { filters: params.filters } : {}),
+        ...(params.scoping ? { scoping: params.scoping } : {}),
       }),
     });
   }

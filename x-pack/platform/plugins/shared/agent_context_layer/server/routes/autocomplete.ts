@@ -46,10 +46,12 @@ export const registerAutocompleteRoute = ({
         body: schema.object({
           query: schema.string({ minLength: 1, maxLength: SML_HTTP_AUTOCOMPLETE_QUERY_MAX_LENGTH }),
           size: schema.maybe(schema.number({ min: 1, max: SML_AUTOCOMPLETE_SIZE_MAX })),
-          // Per-type scoping (e.g. agent-centric connector allow-list). Same
-          // shape as POST /sml/_search so a single FE filter-builder can feed
-          // either route.
-          filters: schema.maybe(
+          // Runtime-imposed per-type scoping (e.g. agent-centric connector
+          // allow-list). Same shape as the `scoping` field on POST /sml/_search
+          // so a single FE scope-builder can feed either route. There is no
+          // agent-discoverable `filters` field on autocomplete — no LLM in this
+          // path to refine the query.
+          scoping: schema.maybe(
             schema.recordOf(
               schema.literal(SmlSearchFilterType.connector),
               schema.object({
@@ -75,7 +77,7 @@ export const registerAutocompleteRoute = ({
         }
 
         const sml = getSmlService();
-        const { query, size, filters } = request.body;
+        const { query, size, scoping } = request.body;
         const esClient = coreContext.elasticsearch.client;
 
         const [, startDeps] = await coreSetup.getStartServices();
@@ -87,7 +89,7 @@ export const registerAutocompleteRoute = ({
           spaceId,
           esClient,
           request,
-          filters,
+          scoping,
         });
 
         const body: SmlAutocompleteHttpResponse = {

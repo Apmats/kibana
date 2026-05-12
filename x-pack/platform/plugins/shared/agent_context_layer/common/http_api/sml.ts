@@ -6,18 +6,37 @@
  */
 
 /**
- * Allowed type keys for the `filters` parameter in SML search.
- * Extend this enum when adding new filterable SML types.
+ * Allowed type keys for the runtime-imposed `scoping` parameter in SML search.
+ * Extend this enum when adding new scopable SML types.
  */
 export enum SmlSearchFilterType {
   connector = 'connector',
 }
 
 /**
- * Per-type filter criteria for SML search.
+ * Runtime-imposed, per-type id-allowlist scoping for SML search.
+ *
+ * Applied transparently by call wrappers from the caller's context (e.g. agent
+ * SO `connector_ids`, future allowed-indices, allowed-skills, RBAC). Not
+ * exposed to the LLM — the agent can't bypass scoping by construction.
+ *
  * Keys must be values of {@link SmlSearchFilterType}.
  */
-export type SmlSearchFilters = Partial<Record<SmlSearchFilterType, { ids?: string[] }>>;
+export type SmlSearchScoping = Partial<Record<SmlSearchFilterType, { ids?: string[] }>>;
+
+/**
+ * Agent-discoverable refinements for SML search.
+ *
+ * Exposed in the LLM tool input schema; the agent picks which (if any) to
+ * supply. Combined with {@link SmlSearchScoping} server-side — agent filters
+ * never widen the runtime-imposed scope.
+ */
+export interface SmlSearchFilters {
+  /** Restrict to one or more SML types (ANY semantics; matches if `type` is in the list). */
+  types?: string[];
+  /** Restrict to records with any of these tags (ANY semantics; `terms` clause on `tags`). */
+  tags?: string[];
+}
 
 /**
  * Max length of `query` for POST `/internal/agent_context_layer/sml/_search`.
@@ -26,19 +45,32 @@ export const SML_HTTP_SEARCH_QUERY_MAX_LENGTH = 512;
 
 /**
  * Response body for `POST /internal/agent_context_layer/sml/_search`.
+ *
+ * `total` reflects the underlying ES match count (pre-permission-filter); the
+ * `results` array may be shorter when post-hoc permission filtering removes
+ * unauthorized hits.
  */
 export interface SmlSearchHttpResponse {
   total: number;
   results: SmlSearchHttpResultItem[];
 }
 
+/**
+ * Compact, LLM-friendly per-hit shape. Full `content` is intentionally dropped
+ * — callers fetch it via the lookup tool (`sml_read`, ticket #14365) when they
+ * need it. `more_content` is set when the indexed record has non-empty content
+ * worth fetching.
+ */
 export interface SmlSearchHttpResultItem {
   id: string;
   type: string;
   origin_id: string;
   title: string;
   score: number;
-  content?: string;
+  description?: string;
+  references?: string[];
+  tags?: string[];
+  more_content?: boolean;
 }
 
 /**

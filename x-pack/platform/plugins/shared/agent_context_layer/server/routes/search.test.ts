@@ -77,19 +77,20 @@ describe('registerSearchRoute', () => {
     expect(mockSmlService.search).not.toHaveBeenCalled();
   });
 
-  it('returns 200 with search results when enabled', async () => {
+  it('returns 200 with the compact LLM-shaped hit body when enabled', async () => {
     const mockResults: SmlSearchResult[] = [
       {
         id: 'chunk-1',
         type: 'visualization',
         title: 'Test Viz',
         origin_id: 'viz-1',
-        content: 'some content',
-        created_at: '2024-01-01',
-        updated_at: '2024-01-02',
+        description: 'A test viz',
+        tags: ['demo'],
+        references: ['dashboard://abc'],
         spaces: ['test-space'],
         permissions: [],
         score: 1.5,
+        more_content: true,
       },
     ];
     mockSmlService.search.mockResolvedValue({ results: mockResults, total: 1 });
@@ -105,33 +106,50 @@ describe('registerSearchRoute', () => {
             origin_id: 'viz-1',
             title: 'Test Viz',
             score: 1.5,
-            content: 'some content',
+            description: 'A test viz',
+            tags: ['demo'],
+            references: ['dashboard://abc'],
+            more_content: true,
           },
         ],
       },
     });
   });
 
-  it('omits content field when skip_content is true', async () => {
+  it('never includes content in the HTTP response body', async () => {
     const mockResults: SmlSearchResult[] = [
       {
         id: 'chunk-1',
         type: 'visualization',
         title: 'Test Viz',
         origin_id: 'viz-1',
-        created_at: '2024-01-01',
-        updated_at: '2024-01-02',
         spaces: ['test-space'],
         permissions: [],
         score: 1.5,
+        more_content: true,
       },
     ];
     mockSmlService.search.mockResolvedValue({ results: mockResults, total: 1 });
 
-    const response = await callHandler({ query: 'test', size: 10, skip_content: true });
+    const response = await callHandler({ query: 'test', size: 10 });
     const body = response.ok.mock.calls[0][0]?.body as Record<string, unknown>;
     const results = (body as any).results;
     expect(results[0]).not.toHaveProperty('content');
+  });
+
+  it('passes scoping and agent-supplied filters through to sml.search', async () => {
+    mockSmlService.search.mockResolvedValue({ results: [], total: 0 });
+    await callHandler({
+      query: 'test',
+      scoping: { connector: { ids: ['gh-1'] } },
+      filters: { types: ['dashboard'], tags: ['production'] },
+    });
+    expect(mockSmlService.search).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scoping: { connector: { ids: ['gh-1'] } },
+        filters: { types: ['dashboard'], tags: ['production'] },
+      })
+    );
   });
 
   it('passes spaceId from spaces plugin to sml.search', async () => {
