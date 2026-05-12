@@ -231,14 +231,7 @@ export class StorageIndexAdapter<
           index_patterns: getIndexPattern(this.storage.name),
           _meta: { version },
           template: {
-            ...(includeSettings
-              ? {
-                  settings: {
-                    ...StorageIndexAdapter.INDEX_SETTINGS,
-                    ...(this.storage.analysis ? { analysis: this.storage.analysis } : {}),
-                  },
-                }
-              : {}),
+            ...(includeSettings ? { settings: StorageIndexAdapter.INDEX_SETTINGS } : {}),
             mappings,
             aliases,
           },
