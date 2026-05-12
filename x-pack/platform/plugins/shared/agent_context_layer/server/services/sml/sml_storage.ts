@@ -41,10 +41,7 @@ const smlStorageSchemaProperties = {
    * SAYT + `bool_prefix` queries in a nested context (bug
    * elastic/elasticsearch#53744, open since 2020). `matched_discovery_labels`
    * entries are returned without `highlighted`; the UI falls back to rendering
-   * plain `value` for those entries. The earlier commit on this branch
-   * (custom edge_ngram analyzer) gets working highlights but loses the
-   * tight per-token semantics SAYT provides — see PR description for the
-   * trade-off discussion.
+   * plain `value` for those entries.
    */
   discovery_labels: types.nested({
     properties: {

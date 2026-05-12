@@ -555,9 +555,7 @@ const pickHighlightSnippet = (
  * elastic/elasticsearch#53744, open since 2020). The highlight config below
  * is retained so the route is forward-compatible once the bug is fixed; until
  * then, `matched_discovery_labels` entries are returned without `highlighted`
- * and the UI renders plain `value`. See PR description for the trade-off vs
- * the earlier custom edge_ngram approach (working highlights but looser
- * matching) and the hybrid AND alternative.
+ * and the UI renders plain `value`.
  *
  * After trim: empty string or `*` → `match_all`.
  */
