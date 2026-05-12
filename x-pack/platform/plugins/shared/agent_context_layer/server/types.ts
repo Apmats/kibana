@@ -20,6 +20,7 @@ import type {
   SmlTypeDefinition,
   SmlSearchResult,
   SmlSearchFilters,
+  SmlSearchScoping,
   SmlDocument,
   SmlIndexAction,
 } from './services/sml/types';
@@ -47,7 +48,9 @@ export interface AgentContextLayerPluginStart {
     spaceId: string;
     esClient: IScopedClusterClient;
     request: KibanaRequest;
-    skipContent?: boolean;
+    /** Runtime-imposed per-type id-allowlist scoping. */
+    scoping?: SmlSearchScoping;
+    /** Agent-discoverable filters (`types[]`, `tags[]`). */
     filters?: SmlSearchFilters;
   }) => Promise<{ results: SmlSearchResult[]; total: number }>;
 
