@@ -23,12 +23,11 @@ export const usePrefetchSml = (filters?: SmlSearchFilters) => {
       return;
     }
     queryClient.prefetchQuery({
-      queryKey: queryKeys.sml.search('*', true, filters),
+      queryKey: queryKeys.sml.autocomplete('*', filters),
       queryFn: () =>
-        smlService.search({
+        smlService.autocomplete({
           query: '*',
           size: SML_SEARCH_DEFAULT_SIZE,
-          skipContent: true,
           filters,
         }),
     });

@@ -8,7 +8,7 @@
 import React, { forwardRef, useCallback, useMemo } from 'react';
 import { css } from '@emotion/react';
 import { EuiHighlight, useEuiTheme } from '@elastic/eui';
-import { useSmlSearch } from '../../../../../../../hooks/sml/use_sml_search';
+import { useSmlAutocomplete } from '../../../../../../../hooks/sml/use_sml_autocomplete';
 import { useAgentId } from '../../../../../../../hooks/use_conversation';
 import { useAgentBuilderAgentById } from '../../../../../../../hooks/agents/use_agent_by_id';
 import type { CommandMenuComponentProps, CommandMenuHandle } from '../../types';
@@ -24,7 +24,7 @@ export const Sml = forwardRef<CommandMenuHandle, CommandMenuComponentProps>(
     const { agent } = useAgentBuilderAgentById(agentId);
     const filters = useMemo(() => buildSmlFiltersFromAgent(agent), [agent]);
     const { euiTheme } = useEuiTheme();
-    const { results, isLoading } = useSmlSearch(query, { skipContent: true, filters });
+    const { results, isLoading } = useSmlAutocomplete(query, { filters });
     const { type, title } = useMemo(() => getSmlMenuHighlightSearchStrings(query), [query]);
 
     const smlMenuLabelStyles = useMemo(
@@ -56,7 +56,6 @@ export const Sml = forwardRef<CommandMenuHandle, CommandMenuComponentProps>(
                   </EuiHighlight>
                 </span>
                 <span>/</span>
-
                 <EuiHighlight strict={false} search={title}>
                   {titlePlain}
                 </EuiHighlight>

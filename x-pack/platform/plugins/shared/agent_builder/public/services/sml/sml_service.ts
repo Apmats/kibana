@@ -7,12 +7,17 @@
 
 import type { HttpSetup } from '@kbn/core-http-browser';
 import type {
+  SmlAutocompleteHttpResponse,
   SmlSearchFilters,
   SmlSearchHttpResponse,
 } from '@kbn/agent-context-layer-plugin/public';
-import { smlSearchPath } from '@kbn/agent-context-layer-plugin/public';
+import { smlAutocompletePath, smlSearchPath } from '@kbn/agent-context-layer-plugin/public';
 
-/** Browser client for SML search (`/internal/agent_context_layer/sml/_search`). */
+/**
+ * Browser client for SML.
+ *   - `search(...)` → `/internal/agent_context_layer/sml/_search` (full retrieval)
+ *   - `autocomplete(...)` → `/internal/agent_context_layer/sml/_autocomplete` (@ menu / typeahead)
+ */
 export class SmlService {
   private readonly http: HttpSetup;
 
@@ -31,6 +36,20 @@ export class SmlService {
         query: params.query,
         size: params.size,
         ...(params.skipContent === true ? { skip_content: true } : {}),
+        ...(params.filters ? { filters: params.filters } : {}),
+      }),
+    });
+  }
+
+  async autocomplete(params: {
+    query: string;
+    size: number;
+    filters?: SmlSearchFilters;
+  }): Promise<SmlAutocompleteHttpResponse> {
+    return await this.http.post<SmlAutocompleteHttpResponse>(smlAutocompletePath, {
+      body: JSON.stringify({
+        query: params.query,
+        size: params.size,
         ...(params.filters ? { filters: params.filters } : {}),
       }),
     });

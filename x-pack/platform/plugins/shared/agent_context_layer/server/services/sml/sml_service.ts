@@ -13,9 +13,11 @@ import type { AuthorizationServiceSetup } from '@kbn/security-plugin-types-serve
 import type {
   SmlService,
   SmlSearchResult,
+  SmlAutocompleteResult,
   SmlDocument,
   SmlTypeDefinition,
   SmlSearchFilters,
+  MatchedDiscoveryLabel,
 } from './types';
 import { createSmlTypeRegistry, type SmlTypeRegistry } from './sml_type_registry';
 import { createSmlIndexer, type SmlIndexer } from './sml_indexer';
@@ -98,6 +100,22 @@ class SmlServiceImpl implements SmlServiceInstance {
           logger,
         });
       },
+      autocomplete: async ({ query, size = 10, spaceId, esClient, request, filters }) => {
+        const rawResults = await autocompleteSml({
+          query,
+          size,
+          spaceId,
+          esClient,
+          logger,
+          filters,
+        });
+        return filterResultsByPermissions({
+          searchResult: rawResults,
+          request,
+          securityAuthz: this.securityAuthz,
+          logger,
+        });
+      },
       checkItemsAccess: async ({ ids, spaceId, esClient, request }) => {
         return checkItemsAccess({
           ids,
@@ -171,18 +189,20 @@ const getAuthorizedPermissions = async ({
  * 1. Collect all unique permission strings from the results.
  * 2. Batch-check them with the security plugin.
  * 3. Remove results whose required permissions are not fully authorized.
+ *
+ * Generic over the result type so both `search` and `autocomplete` paths share it.
  */
-const filterResultsByPermissions = async ({
+const filterResultsByPermissions = async <T extends { permissions: string[] }>({
   searchResult,
   request,
   securityAuthz,
   logger,
 }: {
-  searchResult: { results: SmlSearchResult[]; total: number };
+  searchResult: { results: T[]; total: number };
   request: KibanaRequest;
   securityAuthz?: AuthorizationServiceSetup;
   logger: Logger;
-}): Promise<{ results: SmlSearchResult[]; total: number }> => {
+}): Promise<{ results: T[]; total: number }> => {
   // When the security plugin is absent (e.g. development/testing with security
   // disabled), all results are returned unfiltered. This follows the standard
   // Kibana convention: no security plugin → open access.
@@ -313,15 +333,6 @@ const checkItemsAccess = async ({
   return accessMap;
 };
 
-const SML_SEARCH_AS_YOU_TYPE_FIELDS = [
-  'title_autocomplete',
-  'title_autocomplete._2gram',
-  'title_autocomplete._3gram',
-  'title_autocomplete._index_prefix',
-  'type.autocomplete',
-  'type.autocomplete._index_prefix',
-] as const;
-
 const SML_SEMANTIC_FIELDS = ['title_semantic', 'description_semantic', 'content_semantic'] as const;
 
 const SML_BM25_TEXT_FIELDS = ['title^2', 'description', 'content'] as const;
@@ -450,24 +461,10 @@ const searchSml = async ({
                 {
                   standard: {
                     query: {
-                      bool: {
-                        should: [
-                          {
-                            multi_match: {
-                              query: trimmed,
-                              type: 'bool_prefix' as const,
-                              fields: [...SML_SEARCH_AS_YOU_TYPE_FIELDS],
-                            },
-                          },
-                          {
-                            multi_match: {
-                              query: trimmed,
-                              type: 'best_fields' as const,
-                              fields: [...SML_BM25_TEXT_FIELDS],
-                            },
-                          },
-                        ],
-                        minimum_should_match: 1,
+                      multi_match: {
+                        query: trimmed,
+                        type: 'best_fields' as const,
+                        fields: [...SML_BM25_TEXT_FIELDS],
                       },
                     },
                   },
@@ -504,6 +501,7 @@ const searchSml = async ({
           content: source.content,
           description: source.description,
           tags: source.tags,
+          discovery_labels: source.discovery_labels,
           payload: source.payload,
           references: source.references,
           created_at: source.created_at ?? '',
@@ -524,6 +522,211 @@ const searchSml = async ({
       return { results: [], total: 0 };
     }
     logger.warn(`SML search failed: ${(error as Error).message}`);
+    throw error;
+  }
+};
+
+/**
+ * Pick a highlight snippet from ES's per-subfield highlight object.
+ * Returns the first non-empty snippet; absent if none.
+ */
+const pickHighlightSnippet = (
+  highlight: Record<string, string[]> | undefined
+): string | undefined => {
+  if (!highlight) return undefined;
+  for (const snippets of Object.values(highlight)) {
+    if (snippets && snippets.length > 0) {
+      return snippets[0];
+    }
+  }
+  return undefined;
+};
+
+/**
+ * Build the autocomplete query: a single nested `multi_match bool_prefix` against
+ * `discovery_labels.value` (SAYT) and its auto-generated `_2gram` / `_3gram`
+ * subfields, with `inner_hits` to surface which entries matched (with their
+ * `kind`). Title and type are reachable through this surface because the
+ * indexer auto-prepends them to `discovery_labels`.
+ *
+ * `bool_prefix` is SAYT's native query type: all-but-last analyzed tokens are
+ * required to match as exact indexed terms (against the bigram/trigram shingle
+ * subfields), and the last token is required to match as a prefix (against
+ * `_index_prefix`). With `operator: and` every typed token must contribute —
+ * including the trailing partial. This yields tight per-token semantics:
+ * `"github c"` matches `"GitHub Connector"` but not `"Githubster Cup"`
+ * (because `"github"` is not an indexed token of `"Githubster"`).
+ *
+ * Known limitation: ES does not produce useful highlight snippets for
+ * SAYT + `bool_prefix` + nested + inner_hits (bug
+ * elastic/elasticsearch#53744, open since 2020). The highlight config below
+ * is retained so the route is forward-compatible once the bug is fixed; until
+ * then, `matched_discovery_labels` entries are returned without `highlighted`
+ * and the UI renders plain `value`.
+ *
+ * After trim: empty string or `*` → `match_all`.
+ */
+const buildSmlAutocompleteQuery = (query: string): Record<string, unknown> => {
+  const trimmed = query.trim();
+  if (trimmed === '' || trimmed === '*') {
+    return { match_all: {} };
+  }
+  return {
+    nested: {
+      path: 'discovery_labels',
+      query: {
+        multi_match: {
+          query: trimmed,
+          type: 'bool_prefix',
+          operator: 'and',
+          fields: [
+            'discovery_labels.value',
+            'discovery_labels.value._2gram',
+            'discovery_labels.value._3gram',
+          ],
+        },
+      },
+      inner_hits: {
+        _source: ['discovery_labels.value', 'discovery_labels.kind'],
+        size: 10,
+        highlight: {
+          type: 'unified',
+          number_of_fragments: 0,
+          pre_tags: ['<em>'],
+          post_tags: ['</em>'],
+          // HTML-encode the source text so literal `<`/`>`/`&` in user content
+          // don't collide with the `<em>` wrappers when rendered. No-op while
+          // #53744 keeps SAYT+nested highlight broken; correct once it lands.
+          encoder: 'html',
+          fields: {
+            'discovery_labels.value': {},
+          },
+        },
+      },
+    },
+  };
+};
+
+/**
+ * Autocomplete the SML index. Prefix-only, with per-row provenance for the @ menu.
+ */
+const autocompleteSml = async ({
+  query,
+  size,
+  spaceId,
+  esClient,
+  logger,
+  filters,
+}: {
+  query: string;
+  size: number;
+  spaceId: string;
+  esClient: IScopedClusterClient;
+  logger: Logger;
+  filters?: SmlSearchFilters;
+}): Promise<{ results: SmlAutocompleteResult[]; total: number }> => {
+  logger.debug(
+    `SML autocomplete: query=${JSON.stringify(
+      query
+    )}, size=${size}, spaceId='${spaceId}', index='${smlIndexName}'`
+  );
+
+  try {
+    const smlQuery = buildSmlAutocompleteQuery(query);
+
+    const typeFilter = buildTypeFilters(filters);
+    const filterClauses: Array<Record<string, unknown>> = [
+      {
+        bool: {
+          should: [{ term: { spaces: spaceId } }, { term: { spaces: '*' } }],
+          minimum_should_match: 1,
+        },
+      },
+    ];
+    if (typeFilter) {
+      filterClauses.push(typeFilter);
+    }
+
+    const response = await esClient.asInternalUser.search<SmlDocument>({
+      index: smlIndexName,
+      size,
+      allow_no_indices: true,
+      ignore_unavailable: true,
+      query: {
+        bool: {
+          must: [smlQuery],
+          filter: filterClauses,
+        },
+      },
+      _source: ['id', 'type', 'title', 'origin_id', 'spaces', 'permissions'],
+    });
+
+    const total =
+      typeof response.hits.total === 'number'
+        ? response.hits.total
+        : response.hits.total?.value ?? 0;
+
+    const results: SmlAutocompleteResult[] = response.hits.hits
+      .filter((hit) => hit._source != null)
+      .map((hit) => {
+        const source = hit._source!;
+        const result: SmlAutocompleteResult = {
+          id: source.id ?? '',
+          type: source.type ?? '',
+          title: source.title ?? '',
+          origin_id: source.origin_id ?? '',
+          spaces: source.spaces ?? [],
+          permissions: source.permissions ?? [],
+        };
+        // Inner hits from the nested discovery_labels query: the specific entries
+        // that matched, with their ES-generated highlight snippet wrapping the
+        // matched span(s) in <em>...</em>.
+        const innerHits = (
+          hit as {
+            inner_hits?: Record<
+              string,
+              {
+                hits: {
+                  hits: Array<{
+                    _source: { value?: string; kind?: string };
+                    highlight?: Record<string, string[]>;
+                  }>;
+                };
+              }
+            >;
+          }
+        ).inner_hits;
+        const labelHits = innerHits?.discovery_labels?.hits?.hits;
+        if (labelHits && labelHits.length > 0) {
+          const matched: MatchedDiscoveryLabel[] = labelHits
+            .filter((h) => h._source?.value != null && h._source?.kind != null)
+            .map((h) => {
+              const entry: MatchedDiscoveryLabel = {
+                value: h._source.value!,
+                kind: h._source.kind!,
+              };
+              const snippet = pickHighlightSnippet(h.highlight);
+              if (snippet) {
+                entry.highlighted = snippet;
+              }
+              return entry;
+            });
+          if (matched.length > 0) {
+            result.matched_discovery_labels = matched;
+          }
+        }
+        return result;
+      });
+
+    logger.debug(`SML autocomplete: returned ${results.length} result(s), total=${total}`);
+
+    return { results, total };
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      logger.debug('SML index does not exist yet — returning empty autocomplete results');
+      return { results: [], total: 0 };
+    }
+    logger.warn(`SML autocomplete failed: ${(error as Error).message}`);
     throw error;
   }
 };
@@ -585,6 +788,9 @@ const getDocumentsByIds = async ({
       }
       if (source.tags !== undefined) {
         doc.tags = source.tags;
+      }
+      if (source.discovery_labels !== undefined) {
+        doc.discovery_labels = source.discovery_labels;
       }
       if (source.payload !== undefined) {
         doc.payload = source.payload;
