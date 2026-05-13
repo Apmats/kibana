@@ -42,9 +42,8 @@ export const registerSearchRoute = ({
           query: schema.string({ minLength: 1, maxLength: SML_HTTP_SEARCH_QUERY_MAX_LENGTH }),
           size: schema.maybe(schema.number({ min: 1, max: SML_SEARCH_SIZE_MAX })),
           // Runtime-imposed per-type id-allowlist (e.g. agent-centric connector
-          // allow-list). Sean Story's PR #267333 originally landed this as
-          // `filters`; renamed to `scoping` to make the trust boundary
-          // explicit alongside the new agent-discoverable `filters`.
+          // allow-list). Renamed from `filters` to `scoping` to make the trust
+          // boundary explicit alongside the agent-discoverable `filters`.
           scoping: schema.maybe(
             schema.recordOf(
               schema.literal(SmlSearchFilterType.connector),
@@ -67,6 +66,7 @@ export const registerSearchRoute = ({
               ),
             })
           ),
+          skip_content: schema.maybe(schema.boolean()),
         }),
       },
       options: { access: 'internal' },
@@ -85,15 +85,16 @@ export const registerSearchRoute = ({
         }
 
         const sml = getSmlService();
-        const { query, size, scoping, filters } = request.body;
+        const { query, size, skip_content: skipContent, scoping, filters } = request.body;
         const esClient = coreContext.elasticsearch.client;
 
         const [, startDeps] = await coreSetup.getStartServices();
         const spaceId = startDeps.spaces?.spacesService?.getSpaceId(request) ?? 'default';
 
-        const { results, total } = await sml.search({
+        const { results } = await sml.search({
           query,
           size,
+          skipContent,
           spaceId,
           esClient,
           request,
@@ -102,7 +103,6 @@ export const registerSearchRoute = ({
         });
 
         const body: SmlSearchHttpResponse = {
-          total,
           results: results.map((hit) => {
             const item: SmlSearchHttpResultItem = {
               id: hit.id,
@@ -111,10 +111,10 @@ export const registerSearchRoute = ({
               title: hit.title,
               score: hit.score,
             };
+            if (hit.content !== undefined) item.content = hit.content;
             if (hit.description !== undefined) item.description = hit.description;
             if (hit.references !== undefined) item.references = hit.references;
             if (hit.tags !== undefined) item.tags = hit.tags;
-            if (hit.more_content !== undefined) item.more_content = hit.more_content;
             return item;
           }),
         };

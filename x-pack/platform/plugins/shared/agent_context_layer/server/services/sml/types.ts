@@ -199,21 +199,20 @@ export interface SmlDocument {
  * post-hoc authorization filtering; downstream consumers should not expose it
  * in their response shape.
  *
- * `more_content` is `true` when the indexed record has non-empty `content`
- * (so `sml_read` would return more than this result already exposes).
+ * `content` is omitted when the caller passes `skipContent: true`.
  */
 export interface SmlSearchResult {
   id: string;
   type: string;
   title: string;
   origin_id: string;
+  content?: string;
   description?: string;
   references?: string[];
   tags?: string[];
   spaces: string[];
   permissions: string[];
   score: number;
-  more_content?: boolean;
 }
 
 /**
@@ -320,21 +319,22 @@ export interface SmlService {
     spaceId: string;
     esClient: IScopedClusterClient;
     request: KibanaRequest;
+    /** When true, omits `content` from each result (smaller payload). */
+    skipContent?: boolean;
     /** Runtime-imposed per-type id-allowlist scoping. See {@link SmlSearchScoping}. */
     scoping?: SmlSearchScoping;
     /** Agent-discoverable filters. See {@link SmlSearchFilters}. */
     filters?: SmlSearchFilters;
-  }) => Promise<{ results: SmlSearchResult[]; total: number }>;
+  }) => Promise<{ results: SmlSearchResult[] }>;
 
   /**
    * Autocomplete / typeahead against the SML index. A single nested
    * `multi_match bool_prefix operator: and` against `discovery_labels.value`
    * (search_as_you_type) and its `_2gram` / `_3gram` subfields. Returns per-row
    * provenance for UI badges. Filters by space and permissions the same way
-   * as `search`, and accepts the same per-type `scoping` (e.g. agent-centric
-   * connector allow-list) so consumers can use one scope builder for both
-   * routes. Autocomplete has no `filters` parameter — there's no LLM in this
-   * path to refine the query.
+   * as `search`, and accepts the same per-type `scoping` and caller-supplied
+   * `filters` so a specialized UI picker (e.g. connectors-only or dashboards-only
+   * @ menu) can restrict results without any LLM involvement.
    */
   autocomplete: (params: {
     query: string;
@@ -344,7 +344,9 @@ export interface SmlService {
     request: KibanaRequest;
     /** Runtime-imposed per-type id-allowlist scoping. See {@link SmlSearchScoping}. */
     scoping?: SmlSearchScoping;
-  }) => Promise<{ results: SmlAutocompleteResult[]; total: number }>;
+    /** Caller-supplied type/tag refinements. See {@link SmlSearchFilters}. */
+    filters?: SmlSearchFilters;
+  }) => Promise<{ results: SmlAutocompleteResult[] }>;
 
   /**
    * Check whether the current user has access to specific SML items.

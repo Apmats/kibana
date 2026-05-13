@@ -19,6 +19,8 @@ const createMockEsClient = (): jest.Mocked<ElasticsearchClient> =>
   ({
     search: jest.fn(),
     count: jest.fn(),
+    openPointInTime: jest.fn().mockResolvedValue({ id: 'mock-pit-id' }),
+    closePointInTime: jest.fn().mockResolvedValue({ succeeded: true, num_freed: 1 }),
   } as unknown as jest.Mocked<ElasticsearchClient>);
 
 const createMockScopedClient = (
@@ -196,19 +198,28 @@ describe('SmlService', () => {
       expect(
         (scopedClient.asCurrentUser as jest.Mocked<ElasticsearchClient>).search
       ).not.toHaveBeenCalled();
+      // PIT is opened for the index; search uses pit.id rather than index directly.
+      expect(esClient.openPointInTime).toHaveBeenCalledWith(
+        expect.objectContaining({ index: smlIndexName })
+      );
+      expect(esClient.closePointInTime).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'mock-pit-id' })
+      );
       const call = esClient.search.mock.calls[0]![0]! as {
-        index: string;
+        pit: { id: string; keep_alive: string };
         size: number;
-        allow_no_indices: boolean;
-        ignore_unavailable: boolean;
+        sort: unknown;
         retriever?: unknown;
         query?: unknown;
         _source: unknown;
       };
-      expect(call.index).toBe(smlIndexName);
-      expect(call.size).toBe(10);
-      expect(call.allow_no_indices).toBe(true);
-      expect(call.ignore_unavailable).toBe(true);
+      expect(call.pit).toEqual({ id: 'mock-pit-id', keep_alive: '1m' });
+      // First iteration fetches size × OVERFETCH_MULTIPLIER (10 × 2 = 20).
+      expect(call.size).toBe(20);
+      expect(call.sort).toEqual([
+        { _score: { order: 'desc' } },
+        { _shard_doc: { order: 'asc' } },
+      ]);
       // No `query` block on the retriever path — retriever supersedes it.
       expect(call.query).toBeUndefined();
       expect(call.retriever).toEqual({
@@ -238,8 +249,6 @@ describe('SmlService', () => {
               },
             },
           ],
-          rank_constant: 60,
-          rank_window_size: 50,
         },
       });
       expect(call._source).toEqual({
@@ -342,7 +351,7 @@ describe('SmlService', () => {
         const filterClauses = child.standard!.filter as Array<Record<string, unknown>>;
         expect(filterClauses).toHaveLength(4);
         expect(filterClauses[0]).toEqual(expectedSpaceFilter);
-        // Scoping clause (Sean's per-type id-allowlist shape).
+        // Scoping clause (per-type id-allowlist shape).
         expect(filterClauses[1]).toEqual({
           bool: {
             should: [
@@ -402,7 +411,7 @@ describe('SmlService', () => {
       });
     });
 
-    it('maps response to the compact SmlSearchResult shape (no content blob, more_content set)', async () => {
+    it('maps response to the SmlSearchResult shape (includes content by default)', async () => {
       const service = createSmlService();
       service.setup({ logger });
       const smlService = service.start({ logger });
@@ -417,8 +426,6 @@ describe('SmlService', () => {
                 type: 'lens',
                 title: 'My Viz',
                 origin_id: 'ref-1',
-                // `content` is fetched as a length proxy for more_content but
-                // intentionally dropped from the returned result.
                 content: 'content text',
                 description: 'A lens viz',
                 references: ['lens:other:uuid'],
@@ -445,18 +452,16 @@ describe('SmlService', () => {
         type: 'lens',
         title: 'My Viz',
         origin_id: 'ref-1',
+        content: 'content text',
         description: 'A lens viz',
         references: ['lens:other:uuid'],
         spaces: ['default'],
         permissions: ['saved_object:lens/get'],
         score: 1.5,
-        more_content: true,
       });
-      expect(result.results[0]).not.toHaveProperty('content');
-      expect(result.total).toBe(1);
     });
 
-    it('sets more_content=false when the indexed content is empty', async () => {
+    it('omits content from result when skipContent is true', async () => {
       const service = createSmlService();
       service.setup({ logger });
       const smlService = service.start({ logger });
@@ -471,7 +476,6 @@ describe('SmlService', () => {
                 type: 'connector',
                 title: 'Bare',
                 origin_id: 'b1',
-                content: '',
                 spaces: ['default'],
                 permissions: [],
               },
@@ -487,8 +491,9 @@ describe('SmlService', () => {
         spaceId: 'default',
         esClient: scopedClient,
         request,
+        skipContent: true,
       });
-      expect(result.results[0].more_content).toBe(false);
+      expect(result.results[0]).not.toHaveProperty('content');
     });
 
     it('surfaces description, tags, and references on hits (compact LLM shape)', async () => {
@@ -533,13 +538,13 @@ describe('SmlService', () => {
         type: 'dashboard',
         title: 'Sales Q3',
         origin_id: 'dash-100',
+        content: 'sales content',
         description: 'sales summary',
         tags: ['sales', 'executive'],
         references: ['category://sales'],
         spaces: ['default'],
         permissions: ['saved_object:dashboard/get'],
         score: 2.5,
-        more_content: true,
       });
     });
 
@@ -592,7 +597,6 @@ describe('SmlService', () => {
         request,
       });
 
-      expect(result.total).toBe(2);
       expect(result.results).toHaveLength(2);
     });
 
@@ -601,7 +605,8 @@ describe('SmlService', () => {
       service.setup({ logger });
       const smlService = service.start({ logger });
 
-      esClient.search.mockRejectedValue(createNotFoundError());
+      // With the PIT approach, the 404 surfaces on openPointInTime, not search.
+      esClient.openPointInTime.mockRejectedValue(createNotFoundError());
 
       const result = await smlService.search({
         query: 'foo',
@@ -612,7 +617,6 @@ describe('SmlService', () => {
       });
 
       expect(result.results).toEqual([]);
-      expect(result.total).toBe(0);
       expect(logger.debug).toHaveBeenCalledWith(
         'SML index does not exist yet — returning empty results'
       );
@@ -694,10 +698,6 @@ describe('SmlService', () => {
       expect(result.results).toHaveLength(1);
       expect(result.results[0].id).toBe('chunk-1');
       expect(result.results[0].type).toBe('lens');
-      // `total` reflects ES hits.total.value (pre-permission-filter); post-hoc
-      // permission filtering removed `chunk-2` from `results` but does NOT
-      // overwrite total to `results.length`.
-      expect(result.total).toBe(2);
     });
 
     it('returns all results when securityAuthz is absent', async () => {
@@ -750,7 +750,6 @@ describe('SmlService', () => {
       });
 
       expect(result.results).toHaveLength(2);
-      expect(result.total).toBe(2);
     });
 
     it('uses default size of 10 when not specified', async () => {
@@ -769,9 +768,10 @@ describe('SmlService', () => {
         request,
       });
 
+      // Default size is 10; first loop iteration fetches size × OVERFETCH_MULTIPLIER = 20.
       expect(esClient.search).toHaveBeenCalledWith(
         expect.objectContaining({
-          size: 10,
+          size: 20,
         })
       );
     });
@@ -976,7 +976,6 @@ describe('SmlService', () => {
           { value: 'github', kind: 'tagline', highlighted: '<em>github</em>' },
         ],
       });
-      expect(result.total).toBe(1);
     });
 
     it('omits matched_discovery_labels when absent', async () => {
@@ -1036,7 +1035,7 @@ describe('SmlService', () => {
         request,
       });
 
-      expect(result).toEqual({ results: [], total: 0 });
+      expect(result).toEqual({ results: [] });
     });
 
     it('applies permission filtering when securityAuthz is present', async () => {

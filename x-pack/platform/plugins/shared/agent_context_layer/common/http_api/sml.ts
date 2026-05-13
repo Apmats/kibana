@@ -45,21 +45,14 @@ export const SML_HTTP_SEARCH_QUERY_MAX_LENGTH = 512;
 
 /**
  * Response body for `POST /internal/agent_context_layer/sml/_search`.
- *
- * `total` reflects the underlying ES match count (pre-permission-filter); the
- * `results` array may be shorter when post-hoc permission filtering removes
- * unauthorized hits.
  */
 export interface SmlSearchHttpResponse {
-  total: number;
   results: SmlSearchHttpResultItem[];
 }
 
 /**
- * Compact, LLM-friendly per-hit shape. Full `content` is intentionally dropped
- * — callers fetch it via the lookup tool (`sml_read`, ticket #14365) when they
- * need it. `more_content` is set when the indexed record has non-empty content
- * worth fetching.
+ * Per-hit shape returned by `POST /sml/_search`.
+ * `content` is omitted when the request sets `skip_content: true`.
  */
 export interface SmlSearchHttpResultItem {
   id: string;
@@ -68,9 +61,9 @@ export interface SmlSearchHttpResultItem {
   title: string;
   score: number;
   description?: string;
+  content?: string;
   references?: string[];
   tags?: string[];
-  more_content?: boolean;
 }
 
 /**
@@ -83,7 +76,6 @@ export const SML_HTTP_AUTOCOMPLETE_QUERY_MAX_LENGTH = 256;
  * Response body for `POST /internal/agent_context_layer/sml/_autocomplete`.
  */
 export interface SmlAutocompleteHttpResponse {
-  total: number;
   results: SmlAutocompleteHttpResultItem[];
 }
 

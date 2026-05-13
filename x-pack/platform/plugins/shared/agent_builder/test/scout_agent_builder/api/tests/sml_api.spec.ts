@@ -94,7 +94,6 @@ apiTest.describe('Agent Builder — SML internal API', { tag: [...tags.stateful.
     });
     expect(response).toHaveStatusCode(200);
     const body = response.body as SmlSearchHttpResponse;
-    expect(body.total).toBeGreaterThan(0);
     const match = body.results.find((r) => r.id === searchChunkId);
     expect(match).toBeDefined();
     expect(match?.title).toContain('pacific');
@@ -103,7 +102,7 @@ apiTest.describe('Agent Builder — SML internal API', { tag: [...tags.stateful.
   });
 
   apiTest(
-    'POST /internal/agent_builder/sml/_search wildcard returns compact item fields (no content blob)',
+    'POST /internal/agent_builder/sml/_search wildcard returns item fields',
     async ({ apiClient }) => {
       const response = await apiClient.post(`${INTERNAL_AGENT_CONTEXT_LAYER}/sml/_search`, {
         headers: ih(),
@@ -112,7 +111,6 @@ apiTest.describe('Agent Builder — SML internal API', { tag: [...tags.stateful.
       });
       expect(response).toHaveStatusCode(200);
       const body = response.body as SmlSearchHttpResponse;
-      expect(typeof body.total).toBe('number');
       expect(Array.isArray(body.results)).toBe(true);
       for (const item of body.results) {
         expect(typeof item.id).toBe('string');
@@ -120,9 +118,6 @@ apiTest.describe('Agent Builder — SML internal API', { tag: [...tags.stateful.
         expect(typeof item.type).toBe('string');
         expect(typeof item.title).toBe('string');
         expect(typeof item.score).toBe('number');
-        // Compact LLM-shape: full content blob never travels through search hits;
-        // callers fetch via sml_read when more_content is true.
-        expect('content' in item).toBe(false);
       }
     }
   );

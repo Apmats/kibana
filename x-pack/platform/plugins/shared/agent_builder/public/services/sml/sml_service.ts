@@ -49,12 +49,15 @@ export class SmlService {
     size: number;
     /** Runtime-imposed per-type id-allowlist scoping. */
     scoping?: SmlSearchScoping;
+    /** Caller-supplied type/tag refinements. */
+    filters?: SmlSearchFilters;
   }): Promise<SmlAutocompleteHttpResponse> {
     return await this.http.post<SmlAutocompleteHttpResponse>(smlAutocompletePath, {
       body: JSON.stringify({
         query: params.query,
         size: params.size,
         ...(params.scoping ? { scoping: params.scoping } : {}),
+        ...(params.filters ? { filters: params.filters } : {}),
       }),
     });
   }

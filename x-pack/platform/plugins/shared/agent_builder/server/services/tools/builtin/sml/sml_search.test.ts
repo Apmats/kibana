@@ -47,11 +47,11 @@ describe('createSmlSearchTool', () => {
     expect(tool.description).toContain('"*"');
     expect(tool.description).toContain('types');
     expect(tool.description).toContain('tags');
-    expect(tool.description).toContain('sml_read');
+    expect(tool.description).toContain('sml_attach');
   });
 
   it('calls search with correct params (no scoping, no filters by default)', async () => {
-    mockSearch.mockResolvedValue({ results: [], total: 0 });
+    mockSearch.mockResolvedValue({ results: [] });
     const tool = createSmlSearchTool({ getAgentContextLayer });
     await tool.handler(
       { query: 'cpu usage', size: 20 },
@@ -70,7 +70,7 @@ describe('createSmlSearchTool', () => {
   });
 
   it('forwards agent-supplied types and tags as `filters` to the service', async () => {
-    mockSearch.mockResolvedValue({ results: [], total: 0 });
+    mockSearch.mockResolvedValue({ results: [] });
     const tool = createSmlSearchTool({ getAgentContextLayer });
     await tool.handler(
       { query: 'sales', types: ['dashboard'], tags: ['production'] },
@@ -84,7 +84,7 @@ describe('createSmlSearchTool', () => {
   });
 
   it('omits filters when types/tags are empty arrays (treated as no constraint)', async () => {
-    mockSearch.mockResolvedValue({ results: [], total: 0 });
+    mockSearch.mockResolvedValue({ results: [] });
     const tool = createSmlSearchTool({ getAgentContextLayer });
     await tool.handler(
       { query: 'sales', types: [], tags: [] },
@@ -93,23 +93,23 @@ describe('createSmlSearchTool', () => {
     expect(mockSearch).toHaveBeenCalledWith(expect.objectContaining({ filters: undefined }));
   });
 
-  it('maps document fields to the compact LLM-friendly hit shape', async () => {
+  it('maps document fields to the LLM-friendly hit shape', async () => {
     const hits: SmlSearchResult[] = [
       {
         id: 'chunk-1',
         origin_id: 'ref-1',
         type: 'visualization',
         title: 'CPU Chart',
+        content: 'cpu usage data',
         description: 'A CPU chart',
         tags: ['perf'],
         references: ['dashboard://abc'],
         score: 0.95,
         spaces: ['default'],
         permissions: [],
-        more_content: true,
       },
     ];
-    mockSearch.mockResolvedValue({ results: hits, total: 1 });
+    mockSearch.mockResolvedValue({ results: hits });
     const tool = createSmlSearchTool({ getAgentContextLayer });
     const result = (await tool.handler(
       { query: 'cpu' },
@@ -118,8 +118,7 @@ describe('createSmlSearchTool', () => {
       results: unknown[];
     };
     expect(result.results).toHaveLength(1);
-    const data = (result.results[0] as OtherResult<{ total: number; items: unknown[] }>).data;
-    expect(data.total).toBe(1);
+    const data = (result.results[0] as OtherResult<{ items: unknown[] }>).data;
     expect(data.items).toHaveLength(1);
     expect(data.items[0]).toEqual({
       chunk_id: 'chunk-1',
@@ -127,17 +126,17 @@ describe('createSmlSearchTool', () => {
       attachment_type: 'visualization',
       type: 'visualization',
       title: 'CPU Chart',
+      content: 'cpu usage data',
       description: 'A CPU chart',
       tags: ['perf'],
       references: ['dashboard://abc'],
-      more_content: true,
       score: 0.95,
     });
     expect((result.results[0] as { type: string }).type).toBe(ToolResultType.other);
   });
 
   it('returns "No results found" when empty', async () => {
-    mockSearch.mockResolvedValue({ results: [], total: 0 });
+    mockSearch.mockResolvedValue({ results: [] });
     const tool = createSmlSearchTool({ getAgentContextLayer });
     const result = (await tool.handler(
       { query: 'nonexistent' },
@@ -150,19 +149,17 @@ describe('createSmlSearchTool', () => {
       result.results[0] as OtherResult<{
         message: string;
         query: string;
-        total: number;
         items: unknown[];
       }>
     ).data;
     expect(data.message).toBe('No results found in the Semantic Metadata Layer.');
     expect(data.query).toBe('nonexistent');
-    expect(data.total).toBe(0);
     expect(data.items).toEqual([]);
     expect((result.results[0] as { type: string }).type).toBe(ToolResultType.other);
   });
 
   it('uses default size when not provided', async () => {
-    mockSearch.mockResolvedValue({ results: [], total: 0 });
+    mockSearch.mockResolvedValue({ results: [] });
     const tool = createSmlSearchTool({ getAgentContextLayer });
     await tool.handler({ query: 'test' }, mockContext as unknown as ToolHandlerContext);
     expect(mockSearch).toHaveBeenCalledWith(
@@ -174,7 +171,7 @@ describe('createSmlSearchTool', () => {
   });
 
   it('passes connector_ids as `scoping` (runtime-imposed) from agentConfiguration', async () => {
-    mockSearch.mockResolvedValue({ results: [], total: 0 });
+    mockSearch.mockResolvedValue({ results: [] });
     const contextWithConnectors = {
       ...mockContext,
       agentConfiguration: { connector_ids: ['conn-1', 'conn-2'], tools: [] },
@@ -192,7 +189,7 @@ describe('createSmlSearchTool', () => {
   });
 
   it('does not pass scoping when agentConfiguration has no connector_ids', async () => {
-    mockSearch.mockResolvedValue({ results: [], total: 0 });
+    mockSearch.mockResolvedValue({ results: [] });
     const contextWithoutConnectors = {
       ...mockContext,
       agentConfiguration: { tools: [] },
@@ -212,7 +209,7 @@ describe('createSmlSearchTool', () => {
   });
 
   it('passes empty connector ids scoping when connector_ids is []', async () => {
-    mockSearch.mockResolvedValue({ results: [], total: 0 });
+    mockSearch.mockResolvedValue({ results: [] });
     const contextWithEmptyConnectors = {
       ...mockContext,
       agentConfiguration: { connector_ids: [], tools: [] },
@@ -232,7 +229,7 @@ describe('createSmlSearchTool', () => {
   });
 
   it('does not pass scoping when agentConfiguration is undefined', async () => {
-    mockSearch.mockResolvedValue({ results: [], total: 0 });
+    mockSearch.mockResolvedValue({ results: [] });
 
     const tool = createSmlSearchTool({ getAgentContextLayer });
     await tool.handler({ query: 'test' }, mockContext as unknown as ToolHandlerContext);
@@ -245,7 +242,7 @@ describe('createSmlSearchTool', () => {
   });
 
   it('combines runtime scoping (connectors) with agent-supplied filters', async () => {
-    mockSearch.mockResolvedValue({ results: [], total: 0 });
+    mockSearch.mockResolvedValue({ results: [] });
     const contextWithConnectors = {
       ...mockContext,
       agentConfiguration: { connector_ids: ['conn-1'], tools: [] },

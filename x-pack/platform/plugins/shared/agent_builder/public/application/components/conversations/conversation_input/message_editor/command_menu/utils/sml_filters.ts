@@ -11,11 +11,6 @@ import { SmlSearchFilterType } from '@kbn/agent-context-layer-plugin/public';
 
 // Three states: undefined → no scoping (all connectors visible),
 // [] → no connectors allowed, ['id1', ...] → only those connectors.
-//
-// Produces the runtime-imposed `scoping` payload (Sean Story's #267333
-// trust-boundary shape). Distinct from the agent-discoverable `filters`
-// dimensions added in #14363 — those live in the LLM tool input, not the
-// FE @ menu.
 export const buildSmlScopingFromAgent = (
   agent: AgentDefinition | null
 ): SmlSearchScoping | undefined => {
