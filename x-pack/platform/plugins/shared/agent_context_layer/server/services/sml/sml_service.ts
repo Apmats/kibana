@@ -84,24 +84,30 @@ class SmlServiceImpl implements SmlServiceInstance {
 
     return {
       getCrawler: () => crawler,
-      search: async ({ query, size = 10, spaceId, esClient, request, scoping, filters }) => {
-        const rawResults = await searchSml({
+      search: async ({
+        query,
+        size = 10,
+        skipContent,
+        spaceId,
+        esClient,
+        request,
+        scoping,
+        filters,
+      }) => {
+        return searchSml({
           query,
           size,
+          skipContent,
           spaceId,
           esClient,
+          request,
+          securityAuthz: this.securityAuthz,
           logger,
           scoping,
           filters,
         });
-        return filterResultsByPermissions({
-          searchResult: rawResults,
-          request,
-          securityAuthz: this.securityAuthz,
-          logger,
-        });
       },
-      autocomplete: async ({ query, size = 10, spaceId, esClient, request, scoping }) => {
+      autocomplete: async ({ query, size = 10, spaceId, esClient, request, scoping, filters }) => {
         const rawResults = await autocompleteSml({
           query,
           size,
@@ -109,6 +115,7 @@ class SmlServiceImpl implements SmlServiceInstance {
           esClient,
           logger,
           scoping,
+          filters,
         });
         return filterResultsByPermissions({
           searchResult: rawResults,
@@ -185,40 +192,25 @@ const getAuthorizedPermissions = async ({
 };
 
 /**
- * Filter search results by the current user's permissions.
- *
- * 1. Collect all unique permission strings from the results.
- * 2. Batch-check them with the security plugin.
- * 3. Remove results whose required permissions are not fully authorized.
- *
- * Generic over the result type so both `search` and `autocomplete` paths share
- * it. `total` reflects the underlying ES match count and is preserved across
- * permission filtering — the post-filter `results.length` is a lower bound,
- * not a hit count.
+ * Filter a single page of results by the current user's Kibana RBAC permissions.
+ * Used by the search loop (per page) and directly by autocomplete (single pass).
  */
-const filterResultsByPermissions = async <T extends { permissions: string[] }>({
-  searchResult,
-  request,
-  securityAuthz,
-  logger,
-}: {
-  searchResult: { results: T[]; total: number };
-  request: KibanaRequest;
-  securityAuthz?: AuthorizationServiceSetup;
-  logger: Logger;
-}): Promise<{ results: T[]; total: number }> => {
-  // When the security plugin is absent (e.g. development/testing with security
-  // disabled), all results are returned unfiltered. This follows the standard
-  // Kibana convention: no security plugin → open access.
-  if (!securityAuthz || searchResult.results.length === 0) {
-    return searchResult;
+const filterPageByPermissions = async <T extends { permissions: string[] }>(
+  items: T[],
+  {
+    request,
+    securityAuthz,
+    logger,
+  }: {
+    request: KibanaRequest;
+    securityAuthz?: AuthorizationServiceSetup;
+    logger: Logger;
   }
+): Promise<T[]> => {
+  if (!securityAuthz || items.length === 0) return items;
 
-  const allPermissions = [...new Set(searchResult.results.flatMap((hit) => hit.permissions))];
-
-  if (allPermissions.length === 0) {
-    return searchResult;
-  }
+  const allPermissions = [...new Set(items.flatMap((hit) => hit.permissions))];
+  if (allPermissions.length === 0) return items;
 
   const authorizedPerms = await getAuthorizedPermissions({
     permissions: allPermissions,
@@ -227,12 +219,32 @@ const filterResultsByPermissions = async <T extends { permissions: string[] }>({
     logger,
   });
 
-  const filteredResults = searchResult.results.filter((hit) => {
-    if (hit.permissions.length === 0) return true;
-    return hit.permissions.every((p) => authorizedPerms.has(p));
-  });
+  return items.filter(
+    (hit) => hit.permissions.length === 0 || hit.permissions.every((p) => authorizedPerms.has(p))
+  );
+};
 
-  return { results: filteredResults, total: searchResult.total };
+/**
+ * Wrap filterPageByPermissions for callers that hold a `{ results }` object.
+ * Used by the autocomplete path.
+ */
+const filterResultsByPermissions = async <T extends { permissions: string[] }>({
+  searchResult,
+  request,
+  securityAuthz,
+  logger,
+}: {
+  searchResult: { results: T[] };
+  request: KibanaRequest;
+  securityAuthz?: AuthorizationServiceSetup;
+  logger: Logger;
+}): Promise<{ results: T[] }> => {
+  const filtered = await filterPageByPermissions(searchResult.results, {
+    request,
+    securityAuthz,
+    logger,
+  });
+  return { results: filtered };
 };
 
 /**
@@ -342,6 +354,34 @@ const SML_SEMANTIC_FIELDS = ['title_semantic', 'description_semantic', 'content_
 const SML_BM25_TEXT_FIELDS = ['title^2', 'description', 'content'] as const;
 
 /**
+ * PIT-backed pagination constants for the search loop.
+ *
+ * OVERFETCH_MULTIPLIER: how many docs to fetch per loop iteration relative to
+ * the remaining gap. 2× means we expect ~50% of docs to pass the permission
+ * filter; increase if real-world permission drop rates are higher.
+ *
+ * MAX_SCAN_MULTIPLIER: hard cap on total docs scanned per request. If we scan
+ * size × 10 docs without filling the page the user's permissions are too
+ * restrictive to reliably serve a full page — return what we have.
+ *
+ * PIT_KEEP_ALIVE: how long ES keeps the point-in-time snapshot alive between
+ * loop iterations. 1 minute is sufficient since all iterations happen within a
+ * single request handler; the PIT is always closed before the handler returns.
+ */
+const OVERFETCH_MULTIPLIER = 2;
+const MAX_SCAN_MULTIPLIER = 10;
+const PIT_KEEP_ALIVE = '1m';
+
+/**
+ * Stable sort for PIT + search_after pagination.
+ * _score desc as primary, _shard_doc asc as unique tiebreaker within the PIT.
+ */
+const SEARCH_SORT: Array<Record<string, { order: 'asc' | 'desc' }>> = [
+  { _score: { order: 'desc' } },
+  { _shard_doc: { order: 'asc' } },
+];
+
+/**
  * Build the search retriever body for the natural-language path.
  *
  * Non-empty queries: RRF combining BM25 (`best_fields` over title/description/content)
@@ -401,8 +441,8 @@ const buildSmlSearchBody = ({
  * either (a) match the type AND have an origin_id in the list, or (b) are
  * NOT of the constrained type. Types without scoping are unaffected.
  *
- * Renamed from `buildTypeFilters` to reflect the trust-boundary split between
- * runtime-imposed scope and agent-discoverable filters.
+ * Renamed from `buildTypeFilters` to reflect the trust-boundary split
+ * between runtime-imposed scope and agent-discoverable filters.
  */
 export const buildScopingFilter = (
   scoping: SmlSearchScoping | undefined
@@ -484,109 +524,163 @@ export const buildAgentFilters = (
 };
 
 /**
- * Search the SML index with the hybrid RRF retriever. When the index hasn't
- * been created yet, the function returns empty results silently.
+ * Search the SML index with the hybrid RRF retriever, guaranteeing up to
+ * `size` permission-authorized results via an internal PIT + search_after loop.
+ *
+ * Each iteration fetches `remaining × OVERFETCH_MULTIPLIER` docs, filters them
+ * by Kibana RBAC, and accumulates until the page is full or the index is
+ * exhausted. The loop stops early if `MAX_SCAN_MULTIPLIER × size` total docs
+ * have been scanned without filling the page — a sign that the caller's
+ * permissions are too restrictive to reliably serve a full page.
+ *
+ * The PIT is always closed before the function returns.
  *
  * Filter composition: spaces (always) + scoping (runtime-imposed) + agent
  * filters (caller refinement) — all ANDed. The agent's `filters` can only
  * narrow the runtime-imposed `scoping`; it can't widen it.
+ *
+ * `content` is included in results unless `skipContent` is true.
  */
 const searchSml = async ({
   query,
   size,
+  skipContent,
   spaceId,
   esClient,
+  request,
+  securityAuthz,
   logger,
   scoping,
   filters,
 }: {
   query: string;
   size: number;
+  skipContent?: boolean;
   spaceId: string;
   esClient: IScopedClusterClient;
+  request: KibanaRequest;
+  securityAuthz?: AuthorizationServiceSetup;
   logger: Logger;
   scoping?: SmlSearchScoping;
   filters?: SmlSearchFilters;
-}): Promise<{ results: SmlSearchResult[]; total: number }> => {
+}): Promise<{ results: SmlSearchResult[] }> => {
   logger.debug(
-    `SML search: query=${JSON.stringify(
-      query
-    )}, size=${size}, spaceId='${spaceId}', index='${smlIndexName}', scoping=${
-      scoping ? JSON.stringify(scoping) : 'none'
-    }, filters=${filters ? JSON.stringify(filters) : 'none'}`
+    `SML search: query=${JSON.stringify(query)}, size=${size}, spaceId='${spaceId}'`
   );
 
+  const filterClauses: Array<Record<string, unknown>> = [
+    {
+      bool: {
+        should: [{ term: { spaces: spaceId } }, { term: { spaces: '*' } }],
+        minimum_should_match: 1,
+      },
+    },
+  ];
+  const scopingFilter = buildScopingFilter(scoping);
+  if (scopingFilter) filterClauses.push(scopingFilter);
+  for (const agentClause of buildAgentFilters(filters)) filterClauses.push(agentClause);
+
+  const body = buildSmlSearchBody({ query, filterClauses });
+
+  let pitId: string;
   try {
-    const filterClauses: Array<Record<string, unknown>> = [
-      {
-        bool: {
-          should: [{ term: { spaces: spaceId } }, { term: { spaces: '*' } }],
-          minimum_should_match: 1,
-        },
-      },
-    ];
-    const scopingFilter = buildScopingFilter(scoping);
-    if (scopingFilter) {
-      filterClauses.push(scopingFilter);
-    }
-    for (const agentClause of buildAgentFilters(filters)) {
-      filterClauses.push(agentClause);
-    }
-
-    const body = buildSmlSearchBody({ query, filterClauses });
-
-    const response = await esClient.asInternalUser.search<SmlDocument>({
+    const pit = await esClient.asInternalUser.openPointInTime({
       index: smlIndexName,
-      size,
-      allow_no_indices: true,
+      keep_alive: PIT_KEEP_ALIVE,
       ignore_unavailable: true,
-      ...body,
-      _source: {
-        includes: ['id', 'type', 'title', 'origin_id', 'description', 'tags', 'references', 'spaces', 'permissions', 'content'],
-      },
     });
-
-    const total =
-      typeof response.hits.total === 'number'
-        ? response.hits.total
-        : response.hits.total?.value ?? 0;
-
-    const results: SmlSearchResult[] = response.hits.hits
-      .filter((hit) => hit._source != null)
-      .map((hit) => {
-        const source = hit._source!;
-        const result: SmlSearchResult = {
-          id: source.id ?? '',
-          type: source.type ?? '',
-          title: source.title ?? '',
-          origin_id: source.origin_id ?? '',
-          spaces: source.spaces ?? [],
-          permissions: source.permissions ?? [],
-          score: hit._score ?? 0,
-          more_content: Boolean(source.content && source.content.length > 0),
-        };
-        if (source.description !== undefined) {
-          result.description = source.description;
-        }
-        if (source.tags !== undefined) {
-          result.tags = source.tags;
-        }
-        if (source.references !== undefined) {
-          result.references = source.references;
-        }
-        return result;
-      });
-
-    logger.debug(`SML search: returned ${results.length} result(s), total=${total}`);
-
-    return { results, total };
+    pitId = pit.id;
   } catch (error) {
     if (isNotFoundError(error)) {
       logger.debug('SML index does not exist yet — returning empty results');
-      return { results: [], total: 0 };
+      return { results: [] };
     }
+    throw error;
+  }
+
+  const accumulated: SmlSearchResult[] = [];
+  const maxScan = size * MAX_SCAN_MULTIPLIER;
+  let scanned = 0;
+  let currentSearchAfter: Array<string | number | null> | undefined;
+
+  try {
+    while (accumulated.length < size && scanned < maxScan) {
+      const remaining = size - accumulated.length;
+      const fetchSize = Math.min(remaining * OVERFETCH_MULTIPLIER, maxScan - scanned);
+
+      const response = await esClient.asInternalUser.search<SmlDocument>({
+        pit: { id: pitId, keep_alive: PIT_KEEP_ALIVE },
+        size: fetchSize,
+        sort: SEARCH_SORT,
+        ...(currentSearchAfter ? { search_after: currentSearchAfter } : {}),
+        ...body,
+        _source: {
+          includes: [
+            'id',
+            'type',
+            'title',
+            'origin_id',
+            'description',
+            'tags',
+            'references',
+            'spaces',
+            'permissions',
+            ...(skipContent ? [] : ['content']),
+          ],
+        },
+      });
+
+      // ES may rotate the PIT ID on each response — always use the latest.
+      if (response.pit_id) pitId = response.pit_id;
+
+      const hits = response.hits.hits;
+      if (hits.length === 0) break;
+
+      scanned += hits.length;
+      const lastSort = hits[hits.length - 1].sort;
+      if (lastSort) currentSearchAfter = lastSort as Array<string | number | null>;
+
+      const pageResults: SmlSearchResult[] = hits
+        .filter((hit) => hit._source != null)
+        .map((hit) => {
+          const source = hit._source!;
+          const result: SmlSearchResult = {
+            id: source.id ?? '',
+            type: source.type ?? '',
+            title: source.title ?? '',
+            origin_id: source.origin_id ?? '',
+            spaces: source.spaces ?? [],
+            permissions: source.permissions ?? [],
+            score: hit._score ?? 0,
+          };
+          if (!skipContent && source.content !== undefined) result.content = source.content;
+          if (source.description !== undefined) result.description = source.description;
+          if (source.tags !== undefined) result.tags = source.tags;
+          if (source.references !== undefined) result.references = source.references;
+          return result;
+        });
+
+      const authorizedPage = await filterPageByPermissions(pageResults, {
+        request,
+        securityAuthz,
+        logger,
+      });
+      accumulated.push(...authorizedPage);
+
+      if (hits.length < fetchSize) break; // partial page → index exhausted
+    }
+
+    logger.debug(
+      `SML search: scanned=${scanned}, accumulated=${accumulated.length}, size=${size}`
+    );
+    return { results: accumulated.slice(0, size) };
+  } catch (error) {
     logger.warn(`SML search failed: ${(error as Error).message}`);
     throw error;
+  } finally {
+    await esClient.asInternalUser.closePointInTime({ id: pitId }).catch((err: Error) => {
+      logger.warn(`Failed to close SML search PIT: ${err.message}`);
+    });
   }
 };
 
@@ -681,6 +775,7 @@ const autocompleteSml = async ({
   esClient,
   logger,
   scoping,
+  filters,
 }: {
   query: string;
   size: number;
@@ -688,7 +783,8 @@ const autocompleteSml = async ({
   esClient: IScopedClusterClient;
   logger: Logger;
   scoping?: SmlSearchScoping;
-}): Promise<{ results: SmlAutocompleteResult[]; total: number }> => {
+  filters?: SmlSearchFilters;
+}): Promise<{ results: SmlAutocompleteResult[] }> => {
   logger.debug(
     `SML autocomplete: query=${JSON.stringify(
       query
@@ -698,7 +794,6 @@ const autocompleteSml = async ({
   try {
     const smlQuery = buildSmlAutocompleteQuery(query);
 
-    const scopingFilter = buildScopingFilter(scoping);
     const filterClauses: Array<Record<string, unknown>> = [
       {
         bool: {
@@ -707,8 +802,12 @@ const autocompleteSml = async ({
         },
       },
     ];
+    const scopingFilter = buildScopingFilter(scoping);
     if (scopingFilter) {
       filterClauses.push(scopingFilter);
+    }
+    for (const agentClause of buildAgentFilters(filters)) {
+      filterClauses.push(agentClause);
     }
 
     const response = await esClient.asInternalUser.search<SmlDocument>({
@@ -724,11 +823,6 @@ const autocompleteSml = async ({
       },
       _source: ['id', 'type', 'title', 'origin_id', 'spaces', 'permissions'],
     });
-
-    const total =
-      typeof response.hits.total === 'number'
-        ? response.hits.total
-        : response.hits.total?.value ?? 0;
 
     const results: SmlAutocompleteResult[] = response.hits.hits
       .filter((hit) => hit._source != null)
@@ -782,13 +876,13 @@ const autocompleteSml = async ({
         return result;
       });
 
-    logger.debug(`SML autocomplete: returned ${results.length} result(s), total=${total}`);
+    logger.debug(`SML autocomplete: returned ${results.length} result(s)`);
 
-    return { results, total };
+    return { results };
   } catch (error) {
     if (isNotFoundError(error)) {
       logger.debug('SML index does not exist yet — returning empty autocomplete results');
-      return { results: [], total: 0 };
+      return { results: [] };
     }
     logger.warn(`SML autocomplete failed: ${(error as Error).message}`);
     throw error;

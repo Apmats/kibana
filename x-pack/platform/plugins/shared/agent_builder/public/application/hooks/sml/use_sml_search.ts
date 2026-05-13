@@ -70,7 +70,6 @@ export const useSmlSearch = (query: string, options?: UseSmlSearchOptions) => {
 
   return {
     results: data?.results ?? [],
-    total: data?.total ?? 0,
     isLoading,
     isError,
     error,

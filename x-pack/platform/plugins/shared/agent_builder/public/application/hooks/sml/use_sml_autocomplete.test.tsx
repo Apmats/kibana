@@ -55,7 +55,7 @@ describe('useSmlAutocomplete', () => {
   });
 
   it('forwards the normalized query and scoping into the autocomplete call', async () => {
-    mockAutocomplete.mockResolvedValue({ total: 0, results: [] });
+    mockAutocomplete.mockResolvedValue({ results: [] });
     const scoping = { [SmlSearchFilterType.connector]: { ids: ['gh-1'] } };
 
     renderHook(() => useSmlAutocomplete('git', { scoping }), { wrapper: createWrapper() });

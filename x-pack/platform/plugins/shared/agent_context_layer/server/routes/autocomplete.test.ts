@@ -93,12 +93,11 @@ describe('registerAutocompleteRoute', () => {
         ],
       },
     ];
-    mockSmlService.autocomplete.mockResolvedValue({ results: mockResults, total: 1 });
+    mockSmlService.autocomplete.mockResolvedValue({ results: mockResults });
 
     const response = await callHandler({ query: 'git', size: 10 });
     expect(response.ok).toHaveBeenCalledWith({
       body: {
-        total: 1,
         results: [
           {
             id: 'chunk-1',
@@ -126,7 +125,7 @@ describe('registerAutocompleteRoute', () => {
         permissions: [],
       },
     ];
-    mockSmlService.autocomplete.mockResolvedValue({ results: mockResults, total: 1 });
+    mockSmlService.autocomplete.mockResolvedValue({ results: mockResults });
 
     const response = await callHandler({ query: 'sal', size: 5 });
     const body = response.ok.mock.calls[0][0]?.body as Record<string, unknown>;
@@ -145,7 +144,7 @@ describe('registerAutocompleteRoute', () => {
         permissions: ['saved_object:visualization/get'],
       },
     ];
-    mockSmlService.autocomplete.mockResolvedValue({ results: mockResults, total: 1 });
+    mockSmlService.autocomplete.mockResolvedValue({ results: mockResults });
 
     const response = await callHandler({ query: 'v' });
     const body = response.ok.mock.calls[0][0]?.body as Record<string, unknown>;
@@ -155,7 +154,7 @@ describe('registerAutocompleteRoute', () => {
   });
 
   it('passes spaceId from spaces plugin to sml.autocomplete', async () => {
-    mockSmlService.autocomplete.mockResolvedValue({ results: [], total: 0 });
+    mockSmlService.autocomplete.mockResolvedValue({ results: [] });
     await callHandler({ query: 'test' });
     expect(mockSmlService.autocomplete).toHaveBeenCalledWith(
       expect.objectContaining({ spaceId: 'test-space' })
@@ -184,7 +183,7 @@ describe('registerAutocompleteRoute', () => {
       }),
     };
 
-    mockSmlService.autocomplete.mockResolvedValue({ results: [], total: 0 });
+    mockSmlService.autocomplete.mockResolvedValue({ results: [] });
     await localHandler(ctx, request, response);
     expect(mockSmlService.autocomplete).toHaveBeenCalledWith(
       expect.objectContaining({ spaceId: 'default' })

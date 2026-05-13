@@ -59,15 +59,14 @@ export const createSmlSearchTool = ({
   type: ToolType.builtin,
   description:
     'Search the Semantic Metadata Layer (SML) for Kibana assets such as saved visualizations, dashboards, ' +
-    'workflows, connectors, and more. Hybrid retrieval (BM25 + semantic over title/description/content via ' +
-    'reciprocal rank fusion), so concept queries and synonyms match even when the literal terms are absent.\n\n' +
+    'workflows, connectors, and more. Semantic search — concept queries and synonyms match even when the ' +
+    'literal terms are absent.\n\n' +
     'When to use this tool:\n' +
     "- The user asks about something that likely exists as a Kibana asset but you don't know its exact title.\n" +
     '- You need to discover what is available before deciding how to proceed.\n' +
     '- You want to surface candidates to attach to the conversation (then pass chunk_id to sml_attach).\n\n' +
     'Each result includes: chunk_id, attachment_id, attachment_type, type, title, description (when present), ' +
-    'tags, references (URI strings to related SML records), and a `more_content` flag indicating that ' +
-    'fetching the full record via sml_read would return additional content beyond what is in this result.\n\n' +
+    'tags, references (URI strings to related SML records), and content (the full indexed content for the record).\n\n' +
     'Examples:\n' +
     '1. Plain natural-language query:\n' +
     '     { "query": "cpu usage over time for production hosts" }\n' +
@@ -76,9 +75,7 @@ export const createSmlSearchTool = ({
     '3. Restrict to connectors (e.g. before calling a connector-aware tool):\n' +
     '     { "query": "github", "types": ["connector"] }\n' +
     '4. Wildcard inventory check:\n' +
-    '     { "query": "*", "size": 50 }\n' +
-    '5. Follow-up on a promising hit: if a result has `more_content: true` and `references: [...]`, call ' +
-    'sml_read with its chunk_id to fetch the full record, then optionally search referenced URIs.\n\n' +
+    '     { "query": "*", "size": 50 }\n\n' +
     'To bring a result into the conversation as an attachment, pass its chunk_id to sml_attach.',
   schema: smlSearchSchema,
   tags: ['sml', 'search'],
@@ -102,11 +99,7 @@ export const createSmlSearchTool = ({
 
     // Runtime-imposed scoping: the connector allow-list comes from the
     // resolved agent configuration. The LLM has no say in this — it's part
-    // of the trust boundary. (Open: this should ultimately read the
-    // configuration_override-aware effective config from the tool handler
-    // context once Pierre's mechanism lands; today we consume
-    // `agentConfiguration` which `runner.ts` already resolves with overrides
-    // applied — see `resolveConfiguration` in `run_chat_agent.ts`.)
+    // of the trust boundary.
     const connectorIds = agentConfiguration?.connector_ids;
     const scoping =
       connectorIds !== undefined
@@ -153,7 +146,6 @@ export const createSmlSearchTool = ({
             data: {
               message: 'No results found in the Semantic Metadata Layer.',
               query,
-              total: 0,
               items: [],
             },
           },
@@ -167,17 +159,16 @@ export const createSmlSearchTool = ({
           tool_result_id: getToolResultId(),
           type: ToolResultType.other,
           data: {
-            total: searchResult.total,
             items: searchResult.results.map((hit) => ({
               chunk_id: hit.id,
               attachment_id: hit.origin_id,
               attachment_type: hit.type,
               type: hit.type,
               title: hit.title,
+              content: hit.content,
               description: hit.description,
               tags: hit.tags,
               references: hit.references,
-              more_content: hit.more_content,
               score: hit.score,
             })),
           },

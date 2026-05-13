@@ -55,8 +55,8 @@ export const queryKeys = {
   sml: {
     search: (query: string, scoping?: SmlSearchScoping, filters?: SmlSearchFilters) =>
       ['sml', 'search', { query, scoping, filters }] as const,
-    autocomplete: (query: string, scoping?: SmlSearchScoping) =>
-      ['sml', 'autocomplete', { query, scoping }] as const,
+    autocomplete: (query: string, scoping?: SmlSearchScoping, filters?: SmlSearchFilters) =>
+      ['sml', 'autocomplete', { query, scoping, filters }] as const,
   },
   plugins: {
     all: ['plugins', 'list'] as const,
