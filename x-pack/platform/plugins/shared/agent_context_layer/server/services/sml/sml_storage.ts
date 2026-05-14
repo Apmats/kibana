@@ -13,23 +13,25 @@ import type { SmlDocument } from './types';
 
 export const smlIndexName = chatSystemIndex('sml-data');
 
+const SEMANTIC_MULTI_FIELD = {
+  semantic: types.semantic_text({ index_options: { dense_vector: { type: 'bbq_disk' } } }),
+};
+
 /**
  * Single source of truth for SML data index field mappings (storage + Elasticsearch).
  *
- * Each text source field copies into a dedicated `semantic_text` mirror so the RRF retriever
- * can address them independently (`title_semantic`, `description_semantic`, `content_semantic`).
+ * Each text source field carries a `semantic` multi-field (`title.semantic`,
+ * `description.semantic`, `content.semantic`) so the RRF retriever can address
+ * them independently without a separate top-level field or `copy_to`.
  */
 const smlStorageSchemaProperties = {
   id: types.keyword({}),
   type: types.keyword({}),
-  title: types.text({ copy_to: 'title_semantic' }),
-  title_semantic: types.semantic_text({ index_options: { dense_vector: { type: 'bbq_disk' } } }),
+  title: types.text({ fields: SEMANTIC_MULTI_FIELD }),
   origin_id: types.keyword({}),
-  content: types.text({ copy_to: 'content_semantic' }),
-  content_semantic: types.semantic_text({ index_options: { dense_vector: { type: 'bbq_disk' } } }),
-  description: types.text({ copy_to: 'description_semantic' }),
-  description_semantic: types.semantic_text({ index_options: { dense_vector: { type: 'bbq_disk' } } }),
-  tags: types.keyword({}),
+  content: types.text({ fields: SEMANTIC_MULTI_FIELD }),
+  description: types.text({ fields: SEMANTIC_MULTI_FIELD }),
+  tags: types.keyword({ normalizer: 'lowercase' }),
   /**
    * Autocomplete surface. The indexer auto-prepends two entries on every record:
    *   { value: chunk.title, kind: 'title' }

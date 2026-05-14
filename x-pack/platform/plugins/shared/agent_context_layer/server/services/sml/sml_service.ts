@@ -349,9 +349,11 @@ const checkItemsAccess = async ({
   return accessMap;
 };
 
-const SML_SEMANTIC_FIELDS = ['title_semantic', 'description_semantic', 'content_semantic'] as const;
+const SML_SEMANTIC_FIELDS = ['title.semantic', 'description.semantic', 'content.semantic'] as const;
 
-const SML_BM25_TEXT_FIELDS = ['title^2', 'description', 'content'] as const;
+const SML_TITLE_BOOST = 2;
+
+const SML_BM25_TEXT_FIELDS = [`title^${SML_TITLE_BOOST}`, 'description', 'content'] as const;
 
 /**
  * PIT-backed pagination constants for the search loop.
@@ -384,9 +386,9 @@ const SEARCH_SORT: Array<Record<string, { order: 'asc' | 'desc' }>> = [
 /**
  * Build the search retriever body for the natural-language path.
  *
- * Non-empty queries: RRF combining BM25 (`best_fields` over title/description/content)
- * with semantic retrieval across `title_semantic`, `description_semantic`, and
- * `content_semantic` via the RRF retriever's `query`/`fields` parameters.
+ * Non-empty queries: RRF via the `fields` shorthand — ES creates implicit
+ * sub-retrievers per field (BM25 for `text` fields, semantic for
+ * `semantic_text` fields) and fuses their ranks.
  * Filters are applied at the RRF level so every sub-retriever sees the same scope.
  *
  * Empty string or `*`: falls back to a `match_all` query (no retrieval signal).
@@ -414,20 +416,7 @@ const buildSmlSearchBody = ({
     retriever: {
       rrf: {
         query: trimmed,
-        fields: [...SML_SEMANTIC_FIELDS],
-        retrievers: [
-          {
-            standard: {
-              query: {
-                multi_match: {
-                  query: trimmed,
-                  type: 'best_fields',
-                  fields: [...SML_BM25_TEXT_FIELDS],
-                },
-              },
-            },
-          },
-        ],
+        fields: [...SML_BM25_TEXT_FIELDS, ...SML_SEMANTIC_FIELDS],
         filter: filterClauses,
       },
     },

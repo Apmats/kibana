@@ -218,20 +218,7 @@ describe('SmlService', () => {
       expect(call.retriever).toEqual({
         rrf: {
           query: 'foo bar',
-          fields: ['title_semantic', 'description_semantic', 'content_semantic'],
-          retrievers: [
-            {
-              standard: {
-                query: {
-                  multi_match: {
-                    query: 'foo bar',
-                    type: 'best_fields',
-                    fields: ['title^2', 'description', 'content'],
-                  },
-                },
-              },
-            },
-          ],
+          fields: ['title^2', 'description', 'content', 'title.semantic', 'description.semantic', 'content.semantic'],
           filter: [
             {
               bool: {
@@ -375,9 +362,12 @@ describe('SmlService', () => {
       };
       expect(call.retriever!.rrf!.query).toBe('how is the fleet performing this quarter');
       expect(call.retriever!.rrf!.fields).toEqual([
-        'title_semantic',
-        'description_semantic',
-        'content_semantic',
+        'title^2',
+        'description',
+        'content',
+        'title.semantic',
+        'description.semantic',
+        'content.semantic',
       ]);
     });
 
