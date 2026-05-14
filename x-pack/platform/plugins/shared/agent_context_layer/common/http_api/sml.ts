@@ -21,6 +21,17 @@ export enum SmlSearchFilterType {
  * exposed to the LLM — the agent can't bypass scoping by construction.
  *
  * Keys must be values of {@link SmlSearchFilterType}.
+ *
+ * **Cross-type semantics:** constraints compose with OR across types — a record
+ * satisfies scoping if it passes the constraint for its own type (or has no
+ * constraint for its type). Because a record has exactly one type, per-type
+ * constraints are always mutually exclusive on any given hit; AND semantics
+ * across types are not expressible and not needed.
+ *
+ * **Complexity limit:** this shape intentionally supports only id-allowlists.
+ * More complex runtime constraints (capability-based, classification-based, etc.)
+ * must be pre-computed into a flat list of allowed IDs before being passed here,
+ * or handled as a separate named parameter on the service call.
  */
 export type SmlSearchScoping = Partial<Record<SmlSearchFilterType, { ids?: string[] }>>;
 

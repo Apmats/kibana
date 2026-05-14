@@ -23,12 +23,12 @@ const smlStorageSchemaProperties = {
   id: types.keyword({}),
   type: types.keyword({}),
   title: types.text({ copy_to: 'title_semantic' }),
-  title_semantic: types.semantic_text({}),
+  title_semantic: types.semantic_text({ index_options: { dense_vector: { type: 'bbq_disk' } } }),
   origin_id: types.keyword({}),
   content: types.text({ copy_to: 'content_semantic' }),
-  content_semantic: types.semantic_text({}),
+  content_semantic: types.semantic_text({ index_options: { dense_vector: { type: 'bbq_disk' } } }),
   description: types.text({ copy_to: 'description_semantic' }),
-  description_semantic: types.semantic_text({}),
+  description_semantic: types.semantic_text({ index_options: { dense_vector: { type: 'bbq_disk' } } }),
   tags: types.keyword({}),
   /**
    * Autocomplete surface. The indexer auto-prepends two entries on every record:
