@@ -68,8 +68,8 @@ export interface SmlChunk {
   payload?: Record<string, unknown>;
   /** Owner or last-modifier user id when known */
   user_id?: string;
-  /** Other SML chunk ids (URI form preferred, e.g. `dashboard://abc`) this item references */
-  references?: string[];
+  /** Other SML entries this item references. Each entry carries a `uri` field; the object shape allows sub-fields (e.g. relationship kind) without a future migration. */
+  references?: Array<{ uri: string }>;
   /** Permissions required to access the underlying element (e.g., 'saved_object:lens/get') */
   permissions?: string[];
 }
@@ -178,8 +178,8 @@ export interface SmlDocument {
   payload?: Record<string, unknown>;
   /** Owner or last-modifier user id */
   user_id?: string;
-  /** Referenced SML chunk ids (URI form preferred) */
-  references?: string[];
+  /** Other SML entries this item references. Each entry carries a `uri` field; the object shape allows sub-fields (e.g. relationship kind) without a future migration. */
+  references?: Array<{ uri: string }>;
   /** Timestamp when first created */
   created_at: string;
   /** Timestamp when last updated */
@@ -208,11 +208,10 @@ export interface SmlSearchResult {
   origin_id: string;
   content?: string;
   description?: string;
-  references?: string[];
+  references?: Array<{ uri: string }>;
   tags?: string[];
   spaces: string[];
   permissions: string[];
-  score: number;
 }
 
 /**

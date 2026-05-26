@@ -70,10 +70,9 @@ export interface SmlSearchHttpResultItem {
   type: string;
   origin_id: string;
   title: string;
-  score: number;
   description?: string;
   content?: string;
-  references?: string[];
+  references?: Array<{ uri: string }>;
   tags?: string[];
 }
 

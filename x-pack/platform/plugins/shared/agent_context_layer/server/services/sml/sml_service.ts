@@ -640,7 +640,6 @@ const searchSml = async ({
             origin_id: source.origin_id ?? '',
             spaces: source.spaces ?? [],
             permissions: source.permissions ?? [],
-            score: hit._score ?? 0,
           };
           if (!skipContent && source.content !== undefined) result.content = source.content;
           if (source.description !== undefined) result.description = source.description;

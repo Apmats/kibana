@@ -109,7 +109,6 @@ export const registerSearchRoute = ({
               type: hit.type,
               origin_id: hit.origin_id,
               title: hit.title,
-              score: hit.score,
             };
             if (hit.content !== undefined) item.content = hit.content;
             if (hit.description !== undefined) item.description = hit.description;

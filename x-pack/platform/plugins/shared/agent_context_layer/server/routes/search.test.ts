@@ -87,10 +87,9 @@ describe('registerSearchRoute', () => {
         content: 'test content',
         description: 'A test viz',
         tags: ['demo'],
-        references: ['dashboard://abc'],
+        references: [{ uri: 'dashboard://abc' }],
         spaces: ['test-space'],
         permissions: [],
-        score: 1.5,
       },
     ];
     mockSmlService.search.mockResolvedValue({ results: mockResults });
@@ -104,11 +103,10 @@ describe('registerSearchRoute', () => {
             type: 'visualization',
             origin_id: 'viz-1',
             title: 'Test Viz',
-            score: 1.5,
             content: 'test content',
             description: 'A test viz',
             tags: ['demo'],
-            references: ['dashboard://abc'],
+            references: [{ uri: 'dashboard://abc' }],
           },
         ],
       },
@@ -124,7 +122,6 @@ describe('registerSearchRoute', () => {
         origin_id: 'viz-1',
         spaces: ['test-space'],
         permissions: [],
-        score: 1.5,
       },
     ];
     mockSmlService.search.mockResolvedValue({ results: mockResults });

@@ -56,7 +56,11 @@ const smlStorageSchemaProperties = {
       kind: types.keyword({}),
     },
   }),
-  references: types.keyword({}),
+  references: types.object({
+    properties: {
+      uri: types.keyword({}),
+    },
+  }),
   payload: types.flattened({}),
   user_id: types.keyword({}),
   created_at: types.date({}),
