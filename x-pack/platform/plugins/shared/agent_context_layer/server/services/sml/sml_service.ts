@@ -6,6 +6,7 @@
  */
 
 import { errors } from '@elastic/elasticsearch';
+import type { FieldValue } from '@elastic/elasticsearch/lib/api/types';
 import type { IScopedClusterClient } from '@kbn/core-elasticsearch-server';
 import type { Logger } from '@kbn/logging';
 import type { KibanaRequest } from '@kbn/core-http-server';
@@ -349,78 +350,137 @@ const checkItemsAccess = async ({
   return accessMap;
 };
 
-const SML_SEMANTIC_FIELDS = ['title.semantic', 'description.semantic', 'content.semantic'] as const;
-
-const SML_TITLE_BOOST = 2;
-
-const SML_BM25_TEXT_FIELDS = [`title^${SML_TITLE_BOOST}`, 'description', 'content'] as const;
-
 /**
- * PIT-backed pagination constants for the search loop.
- *
- * OVERFETCH_MULTIPLIER: how many docs to fetch per loop iteration relative to
- * the remaining gap. 2× means we expect ~50% of docs to pass the permission
- * filter; increase if real-world permission drop rates are higher.
- *
- * MAX_SCAN_MULTIPLIER: hard cap on total docs scanned per request. If we scan
- * size × 10 docs without filling the page the user's permissions are too
- * restrictive to reliably serve a full page — return what we have.
- *
- * PIT_KEEP_ALIVE: how long ES keeps the point-in-time snapshot alive between
- * loop iterations. 1 minute is sufficient since all iterations happen within a
- * single request handler; the PIT is always closed before the handler returns.
+ * Maximum docs scanned per search request — a cap on the total overfetch used
+ * to absorb permission filtering. If size × MAX_SCAN_MULTIPLIER docs are
+ * scanned without filling the page the caller's permissions are too restrictive
+ * to reliably fill it — return what we have.
  */
-const OVERFETCH_MULTIPLIER = 2;
 const MAX_SCAN_MULTIPLIER = 10;
-const PIT_KEEP_ALIVE = '1m';
 
 /**
- * Stable sort for PIT + search_after pagination.
- * _score desc as primary, _shard_doc asc as unique tiebreaker within the PIT.
+ * All fields used in FORK MATCH branches: BM25 text fields first, then their
+ * corresponding semantic_text multi-fields. Each field gets its own FORK branch
+ * so FUSE can apply RRF across all six sub-retrievers independently.
  */
-const SEARCH_SORT: Array<Record<string, { order: 'asc' | 'desc' }>> = [
-  { _score: { order: 'desc' } },
-  { _shard_doc: { order: 'asc' } },
-];
+const SML_MATCH_FIELDS = [
+  'title',
+  'description',
+  'content',
+  'title.semantic',
+  'description.semantic',
+  'content.semantic',
+] as const;
 
 /**
- * Build the search retriever body for the natural-language path.
+ * Build an ES|QL query string + positional params array for the SML search path.
  *
- * Non-empty queries: RRF via the `fields` shorthand — ES creates implicit
- * sub-retrievers per field (BM25 for `text` fields, semantic for
- * `semantic_text` fields) and fuses their ranks.
- * Filters are applied at the RRF level so every sub-retriever sees the same scope.
+ * Non-empty queries: six FORK branches (one MATCH per field, BM25 + semantic)
+ * merged by FUSE with RRF. Filters are applied as WHERE clauses before FORK so
+ * every branch operates on the same filtered set.
  *
- * Empty string or `*`: falls back to a `match_all` query (no retrieval signal).
+ * Empty string or `*`: plain sorted scan — no FORK/FUSE, no relevance signal.
+ *
+ * Spaces filter uses MV_CONTAINS rather than `==` because `==` returns null
+ * (not false) when the field has multiple values — a known ES|QL multi-value
+ * semantic that would silently drop multi-space documents.
+ *
+ * Tag filter similarly uses MV_CONTAINS for the same reason.
+ *
+ * The LIMIT is size × MAX_SCAN_MULTIPLIER to leave room for permission
+ * post-filtering; the caller slices the authorized results to `size`.
+ *
+ * `references.uri` is extracted via EVAL before KEEP so the result column is
+ * a flat keyword array that can be reconstructed into Array<{uri}> client-side.
  */
-const buildSmlSearchBody = ({
+const buildSmlEsqlQuery = ({
   query,
-  filterClauses,
+  size,
+  skipContent,
+  spaceId,
+  scoping,
+  filters,
 }: {
   query: string;
-  filterClauses: Array<Record<string, unknown>>;
-}): Record<string, unknown> => {
-  const trimmed = query.trim();
-  if (trimmed === '' || trimmed === '*') {
-    return {
-      query: {
-        bool: {
-          must: [{ match_all: {} }],
-          filter: filterClauses,
-        },
-      },
-    };
+  size: number;
+  skipContent?: boolean;
+  spaceId: string;
+  scoping?: SmlSearchScoping;
+  filters?: SmlSearchFilters;
+}): { esql: string; params: unknown[] } => {
+  const params: unknown[] = [];
+  const lines: string[] = [`FROM ${smlIndexName}`];
+
+  // spaces filter — MV_CONTAINS handles multi-value docs (== returns null for them)
+  params.push(spaceId);
+  lines.push('| WHERE MV_CONTAINS(spaces, ?)');
+
+  // runtime-imposed per-type id-allowlist scoping
+  if (scoping) {
+    for (const [typeId, criteria] of Object.entries(scoping)) {
+      if (!criteria?.ids) continue;
+      if (criteria.ids.length === 0) {
+        // Explicitly empty → exclude all documents of this type
+        params.push(typeId);
+        lines.push('| WHERE type != ?');
+      } else {
+        // Non-empty → allow matching docs of this type, pass through other types
+        const idPlaceholders = criteria.ids.map(() => '?').join(', ');
+        params.push(typeId, ...criteria.ids);
+        lines.push(`| WHERE type != ? OR origin_id IN (${idPlaceholders})`);
+      }
+    }
   }
 
-  return {
-    retriever: {
-      rrf: {
-        query: trimmed,
-        fields: [...SML_BM25_TEXT_FIELDS, ...SML_SEMANTIC_FIELDS],
-        filter: filterClauses,
-      },
-    },
-  };
+  // agent-discoverable type filter
+  if (filters?.types && filters.types.length > 0) {
+    const placeholders = filters.types.map(() => '?').join(', ');
+    params.push(...filters.types);
+    lines.push(`| WHERE type IN (${placeholders})`);
+  }
+
+  // agent-discoverable tag filter — MV_CONTAINS for multi-value safety
+  if (filters?.tags && filters.tags.length > 0) {
+    const tagConditions = filters.tags.map((tag) => {
+      params.push(tag);
+      return 'MV_CONTAINS(tags, ?)';
+    });
+    lines.push(`| WHERE ${tagConditions.join(' OR ')}`);
+  }
+
+  const trimmed = query.trim();
+  if (trimmed === '' || trimmed === '*') {
+    lines.push('| SORT id ASC');
+  } else {
+    lines.push('| FORK');
+    for (const field of SML_MATCH_FIELDS) {
+      params.push(trimmed);
+      lines.push(`  (MATCH(${field}, ?))`);
+    }
+    lines.push('| FUSE');
+    lines.push('| SORT _score DESC, id ASC');
+  }
+
+  lines.push(`| LIMIT ${size * MAX_SCAN_MULTIPLIER}`);
+
+  // Materialize the object sub-field into a flat keyword column before KEEP.
+  lines.push('| EVAL ref_uris = references.uri');
+
+  const keepCols = [
+    'id',
+    'type',
+    'title',
+    'origin_id',
+    'description',
+    'tags',
+    'ref_uris',
+    'spaces',
+    'permissions',
+    ...(skipContent ? [] : ['content']),
+  ];
+  lines.push(`| KEEP ${keepCols.join(', ')}`);
+
+  return { esql: lines.join('\n'), params };
 };
 
 /**
@@ -513,22 +573,31 @@ export const buildAgentFilters = (
 };
 
 /**
- * Search the SML index with the hybrid RRF retriever, guaranteeing up to
- * `size` permission-authorized results via an internal PIT + search_after loop.
+ * Returns true for ES|QL errors that indicate the SML index does not exist yet.
+ * ES|QL does not support `ignore_unavailable`; a missing index surfaces as a
+ * `verification_exception` (400) or `index_not_found_exception` (400/404).
+ */
+const isEsqlIndexMissingError = (error: unknown): boolean => {
+  if (!(error instanceof errors.ResponseError)) return false;
+  const body = error.body as { error?: { type?: string } } | undefined;
+  return (
+    body?.error?.type === 'index_not_found_exception' ||
+    body?.error?.type === 'verification_exception'
+  );
+};
+
+/**
+ * Search the SML index using ES|QL FORK + FUSE hybrid retrieval.
  *
- * Each iteration fetches `remaining × OVERFETCH_MULTIPLIER` docs, filters them
- * by Kibana RBAC, and accumulates until the page is full or the index is
- * exhausted. The loop stops early if `MAX_SCAN_MULTIPLIER × size` total docs
- * have been scanned without filling the page — a sign that the caller's
- * permissions are too restrictive to reliably serve a full page.
+ * A single ES|QL query fetches size × MAX_SCAN_MULTIPLIER docs (to absorb
+ * permission post-filtering). Docs are filtered by Kibana RBAC and the first
+ * `size` authorized results are returned.
  *
- * The PIT is always closed before the function returns.
+ * Non-empty queries: six FORK branches (BM25 × 3 + semantic × 3), merged by
+ * FUSE with RRF. Empty string or `*`: plain sorted scan, no relevance signal.
  *
- * Filter composition: spaces (always) + scoping (runtime-imposed) + agent
- * filters (caller refinement) — all ANDed. The agent's `filters` can only
- * narrow the runtime-imposed `scoping`; it can't widen it.
- *
- * `content` is included in results unless `skipContent` is true.
+ * Filter composition: spaces (MV_CONTAINS) + scoping (runtime-imposed per-type
+ * id-allowlist) + agent filters — all ANDed as WHERE clauses before FORK.
  */
 const searchSml = async ({
   query,
@@ -553,123 +622,75 @@ const searchSml = async ({
   scoping?: SmlSearchScoping;
   filters?: SmlSearchFilters;
 }): Promise<{ results: SmlSearchResult[] }> => {
-  logger.debug(
-    `SML search: query=${JSON.stringify(query)}, size=${size}, spaceId='${spaceId}'`
-  );
+  logger.debug(`SML search: query=${JSON.stringify(query)}, size=${size}, spaceId='${spaceId}'`);
 
-  const filterClauses: Array<Record<string, unknown>> = [
-    {
-      bool: {
-        should: [{ term: { spaces: spaceId } }, { term: { spaces: '*' } }],
-        minimum_should_match: 1,
-      },
-    },
-  ];
-  const scopingFilter = buildScopingFilter(scoping);
-  if (scopingFilter) filterClauses.push(scopingFilter);
-  for (const agentClause of buildAgentFilters(filters)) filterClauses.push(agentClause);
+  const { esql, params } = buildSmlEsqlQuery({
+    query,
+    size,
+    skipContent,
+    spaceId,
+    scoping,
+    filters,
+  });
 
-  const body = buildSmlSearchBody({ query, filterClauses });
-
-  let pitId: string;
+  let response: { columns: Array<{ name: string; type: string }>; values: unknown[][] };
   try {
-    const pit = await esClient.asInternalUser.openPointInTime({
-      index: smlIndexName,
-      keep_alive: PIT_KEEP_ALIVE,
-      ignore_unavailable: true,
+    response = await esClient.asInternalUser.esql.query({
+      query: esql,
+      ...(params.length > 0 ? { params: params as unknown as FieldValue[] } : {}),
     });
-    pitId = pit.id;
   } catch (error) {
-    if (isNotFoundError(error)) {
+    if (isNotFoundError(error) || isEsqlIndexMissingError(error)) {
       logger.debug('SML index does not exist yet — returning empty results');
       return { results: [] };
     }
-    throw error;
-  }
-
-  const accumulated: SmlSearchResult[] = [];
-  const maxScan = size * MAX_SCAN_MULTIPLIER;
-  let scanned = 0;
-  let currentSearchAfter: Array<string | number | null> | undefined;
-
-  try {
-    while (accumulated.length < size && scanned < maxScan) {
-      const remaining = size - accumulated.length;
-      const fetchSize = Math.min(remaining * OVERFETCH_MULTIPLIER, maxScan - scanned);
-
-      const response = await esClient.asInternalUser.search<SmlDocument>({
-        pit: { id: pitId, keep_alive: PIT_KEEP_ALIVE },
-        size: fetchSize,
-        sort: SEARCH_SORT,
-        ...(currentSearchAfter ? { search_after: currentSearchAfter } : {}),
-        ...body,
-        _source: {
-          includes: [
-            'id',
-            'type',
-            'title',
-            'origin_id',
-            'description',
-            'tags',
-            'references',
-            'spaces',
-            'permissions',
-            ...(skipContent ? [] : ['content']),
-          ],
-        },
-      });
-
-      // ES may rotate the PIT ID on each response — always use the latest.
-      if (response.pit_id) pitId = response.pit_id;
-
-      const hits = response.hits.hits;
-      if (hits.length === 0) break;
-
-      scanned += hits.length;
-      const lastSort = hits[hits.length - 1].sort;
-      if (lastSort) currentSearchAfter = lastSort as Array<string | number | null>;
-
-      const pageResults: SmlSearchResult[] = hits
-        .filter((hit) => hit._source != null)
-        .map((hit) => {
-          const source = hit._source!;
-          const result: SmlSearchResult = {
-            id: source.id ?? '',
-            type: source.type ?? '',
-            title: source.title ?? '',
-            origin_id: source.origin_id ?? '',
-            spaces: source.spaces ?? [],
-            permissions: source.permissions ?? [],
-          };
-          if (!skipContent && source.content !== undefined) result.content = source.content;
-          if (source.description !== undefined) result.description = source.description;
-          if (source.tags !== undefined) result.tags = source.tags;
-          if (source.references !== undefined) result.references = source.references;
-          return result;
-        });
-
-      const authorizedPage = await filterPageByPermissions(pageResults, {
-        request,
-        securityAuthz,
-        logger,
-      });
-      accumulated.push(...authorizedPage);
-
-      if (hits.length < fetchSize) break; // partial page → index exhausted
-    }
-
-    logger.debug(
-      `SML search: scanned=${scanned}, accumulated=${accumulated.length}, size=${size}`
-    );
-    return { results: accumulated.slice(0, size) };
-  } catch (error) {
     logger.warn(`SML search failed: ${(error as Error).message}`);
     throw error;
-  } finally {
-    await esClient.asInternalUser.closePointInTime({ id: pitId }).catch((err: Error) => {
-      logger.warn(`Failed to close SML search PIT: ${err.message}`);
-    });
   }
+
+  const colIndex = new Map<string, number>(response.columns.map((col, i) => [col.name, i]));
+
+  const toStringArray = (v: unknown): string[] => {
+    if (v == null) return [];
+    return Array.isArray(v) ? (v as unknown[]).filter((s) => s != null).map(String) : [String(v)];
+  };
+
+  const allResults: SmlSearchResult[] = response.values.map((row) => {
+    const result: SmlSearchResult = {
+      id: String(row[colIndex.get('id')!] ?? ''),
+      type: String(row[colIndex.get('type')!] ?? ''),
+      title: String(row[colIndex.get('title')!] ?? ''),
+      origin_id: String(row[colIndex.get('origin_id')!] ?? ''),
+      spaces: toStringArray(row[colIndex.get('spaces')!]),
+      permissions: toStringArray(row[colIndex.get('permissions')!]),
+    };
+
+    const contentIdx = colIndex.get('content');
+    if (!skipContent && contentIdx !== undefined) {
+      const content = row[contentIdx];
+      if (content != null) result.content = String(content);
+    }
+
+    const desc = row[colIndex.get('description')!];
+    if (desc != null) result.description = String(desc);
+
+    const rawTags = row[colIndex.get('tags')!];
+    if (rawTags != null) result.tags = toStringArray(rawTags);
+
+    const refUrisIdx = colIndex.get('ref_uris');
+    if (refUrisIdx !== undefined) {
+      const refUris = toStringArray(row[refUrisIdx]);
+      if (refUris.length > 0) result.references = refUris.map((uri) => ({ uri }));
+    }
+
+    return result;
+  });
+
+  const authorized = await filterPageByPermissions(allResults, { request, securityAuthz, logger });
+  logger.debug(
+    `SML search: scanned=${response.values.length}, authorized=${authorized.length}, size=${size}`
+  );
+  return { results: authorized.slice(0, size) };
 };
 
 /**
