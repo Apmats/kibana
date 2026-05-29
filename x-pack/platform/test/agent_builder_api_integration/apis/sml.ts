@@ -94,7 +94,7 @@ export default function ({ getService }: FtrProviderContext) {
         expect(match!.type).to.be('visualization');
       });
 
-      it('returns total and results with the expected item fields (wildcard)', async () => {
+      it('returns total and a compact item shape (no content blob) for wildcard', async () => {
         const response = await supertest
           .post('/internal/agent_context_layer/sml/_search')
           .set('kbn-xsrf', 'kibana')
@@ -115,23 +115,10 @@ export default function ({ getService }: FtrProviderContext) {
           expect(item).to.have.property('origin_id');
           expect(item).to.have.property('type');
           expect(item).to.have.property('title');
-          expect(item).to.have.property('content');
           expect(item).to.have.property('score');
           expect(item.score).to.be.a('number');
-        }
-      });
-
-      it('omits content on each hit when skip_content is true', async () => {
-        const response = await supertest
-          .post('/internal/agent_context_layer/sml/_search')
-          .set('kbn-xsrf', 'kibana')
-          .set('x-elastic-internal-origin', 'kibana')
-          .send({ query: '*', size: 10, skip_content: true })
-          .expect(200);
-
-        const body = response.body as SmlSearchHttpResponse;
-        expect(body.results.length).to.be.greaterThan(0);
-        for (const item of body.results) {
+          // Compact LLM-shape: full content blob is intentionally not returned
+          // on search hits; callers fetch via sml_read when more_content is true.
           expect(item).not.to.have.property('content');
         }
       });

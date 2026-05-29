@@ -138,9 +138,9 @@ describe('Sml', () => {
     expect(screen.queryByTestId('smlMenuError')).not.toBeInTheDocument();
   });
 
-  it('passes undefined filters to useSmlAutocomplete when the agent has no connector scoping', () => {
+  it('passes undefined scoping to useSmlAutocomplete when the agent has no connector scoping', () => {
     renderWithProvider(<Sml query="git" onSelect={jest.fn()} />);
 
-    expect(mockUseSmlAutocomplete).toHaveBeenCalledWith('git', { filters: undefined });
+    expect(mockUseSmlAutocomplete).toHaveBeenCalledWith('git', { scoping: undefined });
   });
 });

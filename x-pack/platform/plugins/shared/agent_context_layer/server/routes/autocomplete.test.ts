@@ -84,7 +84,7 @@ describe('registerAutocompleteRoute', () => {
         id: 'chunk-1',
         type: 'connector',
         title: 'GitHub Connector',
-        origin_id: 'gh-1',
+        origin: { uri: 'gh-1' },
         spaces: ['test-space'],
         permissions: [],
         matched_discovery_labels: [
@@ -93,17 +93,16 @@ describe('registerAutocompleteRoute', () => {
         ],
       },
     ];
-    mockSmlService.autocomplete.mockResolvedValue({ results: mockResults, total: 1 });
+    mockSmlService.autocomplete.mockResolvedValue({ results: mockResults });
 
     const response = await callHandler({ query: 'git', size: 10 });
     expect(response.ok).toHaveBeenCalledWith({
       body: {
-        total: 1,
         results: [
           {
             id: 'chunk-1',
             type: 'connector',
-            origin_id: 'gh-1',
+            origin: { uri: 'gh-1' },
             title: 'GitHub Connector',
             matched_discovery_labels: [
               { value: 'GitHub Connector', kind: 'title' },
@@ -121,12 +120,12 @@ describe('registerAutocompleteRoute', () => {
         id: 'chunk-2',
         type: 'dashboard',
         title: 'Sales Q3',
-        origin_id: 'dash-1',
+        origin: { uri: 'dash-1' },
         spaces: ['test-space'],
         permissions: [],
       },
     ];
-    mockSmlService.autocomplete.mockResolvedValue({ results: mockResults, total: 1 });
+    mockSmlService.autocomplete.mockResolvedValue({ results: mockResults });
 
     const response = await callHandler({ query: 'sal', size: 5 });
     const body = response.ok.mock.calls[0][0]?.body as Record<string, unknown>;
@@ -140,12 +139,12 @@ describe('registerAutocompleteRoute', () => {
         id: 'chunk-3',
         type: 'visualization',
         title: 'V',
-        origin_id: 'v-1',
+        origin: { uri: 'v-1' },
         spaces: ['test-space'],
         permissions: ['saved_object:visualization/get'],
       },
     ];
-    mockSmlService.autocomplete.mockResolvedValue({ results: mockResults, total: 1 });
+    mockSmlService.autocomplete.mockResolvedValue({ results: mockResults });
 
     const response = await callHandler({ query: 'v' });
     const body = response.ok.mock.calls[0][0]?.body as Record<string, unknown>;
@@ -155,7 +154,7 @@ describe('registerAutocompleteRoute', () => {
   });
 
   it('passes spaceId from spaces plugin to sml.autocomplete', async () => {
-    mockSmlService.autocomplete.mockResolvedValue({ results: [], total: 0 });
+    mockSmlService.autocomplete.mockResolvedValue({ results: [] });
     await callHandler({ query: 'test' });
     expect(mockSmlService.autocomplete).toHaveBeenCalledWith(
       expect.objectContaining({ spaceId: 'test-space' })
@@ -184,7 +183,7 @@ describe('registerAutocompleteRoute', () => {
       }),
     };
 
-    mockSmlService.autocomplete.mockResolvedValue({ results: [], total: 0 });
+    mockSmlService.autocomplete.mockResolvedValue({ results: [] });
     await localHandler(ctx, request, response);
     expect(mockSmlService.autocomplete).toHaveBeenCalledWith(
       expect.objectContaining({ spaceId: 'default' })

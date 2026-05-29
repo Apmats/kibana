@@ -54,11 +54,11 @@ describe('useSmlAutocomplete', () => {
     mockAutocomplete.mockReset();
   });
 
-  it('forwards the normalized query and filters into the autocomplete call', async () => {
-    mockAutocomplete.mockResolvedValue({ total: 0, results: [] });
-    const filters = { [SmlSearchFilterType.connector]: { ids: ['gh-1'] } };
+  it('forwards the normalized query and scoping into the autocomplete call', async () => {
+    mockAutocomplete.mockResolvedValue({ results: [] });
+    const scoping = { [SmlSearchFilterType.connector]: { ids: ['gh-1'] } };
 
-    renderHook(() => useSmlAutocomplete('git', { filters }), { wrapper: createWrapper() });
+    renderHook(() => useSmlAutocomplete('git', { scoping }), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(mockAutocomplete).toHaveBeenCalledTimes(1);
@@ -67,7 +67,7 @@ describe('useSmlAutocomplete', () => {
     expect(mockAutocomplete).toHaveBeenCalledWith({
       query: 'git',
       size: SML_SEARCH_DEFAULT_SIZE,
-      filters,
+      scoping,
     });
   });
 

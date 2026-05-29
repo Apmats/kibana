@@ -14,7 +14,7 @@ import { useAgentBuilderAgentById } from '../../../../../../../hooks/agents/use_
 import type { CommandMenuComponentProps, CommandMenuHandle } from '../../types';
 import { CommandId } from '../../types';
 import { getSmlMenuHighlightSearchStrings } from '../../utils/sml_command_menu_highlight';
-import { buildSmlFiltersFromAgent } from '../../utils/sml_filters';
+import { buildSmlScopingFromAgent } from '../../utils/sml_filters';
 import { CommandMenuList } from '../components/command_menu_list';
 import type { CommandMenuListOption } from '../components/command_menu_list';
 
@@ -22,9 +22,9 @@ export const Sml = forwardRef<CommandMenuHandle, CommandMenuComponentProps>(
   ({ query, onSelect }, ref) => {
     const agentId = useAgentId();
     const { agent } = useAgentBuilderAgentById(agentId);
-    const filters = useMemo(() => buildSmlFiltersFromAgent(agent), [agent]);
+    const scoping = useMemo(() => buildSmlScopingFromAgent(agent), [agent]);
     const { euiTheme } = useEuiTheme();
-    const { results, isLoading } = useSmlAutocomplete(query, { filters });
+    const { results, isLoading } = useSmlAutocomplete(query, { scoping });
     const { type, title } = useMemo(() => getSmlMenuHighlightSearchStrings(query), [query]);
 
     const smlMenuLabelStyles = useMemo(

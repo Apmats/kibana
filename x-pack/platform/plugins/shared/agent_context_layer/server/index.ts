@@ -27,6 +27,7 @@ export type {
   SmlToAttachmentContext,
   SmlListItem,
   SmlSearchResult,
+  SmlSearchConstraints,
   SmlSearchFilters,
   SmlDocument,
   SmlIndexAction,

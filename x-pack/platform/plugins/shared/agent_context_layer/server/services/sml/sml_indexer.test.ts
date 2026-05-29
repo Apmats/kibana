@@ -157,6 +157,7 @@ describe('createSmlIndexer', () => {
         type: 'lens',
         title: 'My Viz',
         origin_id: 'att-2',
+        origin: { uri: 'lens://att-2' },
         content: 'content',
         created_at: expect.any(String),
         updated_at: expect.any(String),
@@ -169,7 +170,7 @@ describe('createSmlIndexer', () => {
       });
     });
 
-    it('create action: round-trips all new schema fields (tags, discovery_labels, payload, references, description, user_id)', async () => {
+    it('create action: round-trips all new schema fields (tags, discovery_labels, extended_attrs, references, description, user_id)', async () => {
       const bulkMock = jest.fn().mockResolvedValue({ errors: false, items: [] });
       const getClientMock = jest.fn().mockReturnValue({ bulk: bulkMock });
       (createSmlStorage as jest.Mock).mockReturnValue({ getClient: getClientMock });
@@ -186,12 +187,12 @@ describe('createSmlIndexer', () => {
               { value: 'q3 sales', kind: 'tagline' },
               { value: 'sales q3 dashboard', kind: 'nickname' },
             ],
-            payload: {
+            extended_attrs: {
               owner_team: 'sales-ops',
               fields: [{ name: 'revenue', type: 'currency' }],
             },
             user_id: 'user-7',
-            references: ['category://sales', 'dashboard://parent-1'],
+            references: [{ uri: 'category://sales' }, { uri: 'dashboard://parent-1' }],
             permissions: ['saved_object:dashboard/get'],
           },
         ],
@@ -221,6 +222,7 @@ describe('createSmlIndexer', () => {
         type: 'dashboard',
         title: 'Sales Q3',
         origin_id: 'dash-100',
+        origin: { uri: 'dashboard://dash-100' },
         content: 'sales dashboard for Q3 with revenue and conversion metrics',
         description: 'Quarterly sales overview, executive audience',
         tags: ['sales', 'executive', 'quarterly'],
@@ -230,12 +232,12 @@ describe('createSmlIndexer', () => {
           { value: 'q3 sales', kind: 'tagline' },
           { value: 'sales q3 dashboard', kind: 'nickname' },
         ],
-        payload: {
+        extended_attrs: {
           owner_team: 'sales-ops',
           fields: [{ name: 'revenue', type: 'currency' }],
         },
         user_id: 'user-7',
-        references: ['category://sales', 'dashboard://parent-1'],
+        references: [{ uri: 'category://sales' }, { uri: 'dashboard://parent-1' }],
         created_at: expect.any(String),
         updated_at: expect.any(String),
         spaces: ['default'],

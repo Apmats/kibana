@@ -20,6 +20,7 @@ import type {
   SmlTypeDefinition,
   SmlSearchResult,
   SmlSearchFilters,
+  SmlSearchConstraints,
   SmlDocument,
   SmlIndexAction,
 } from './services/sml/types';
@@ -47,9 +48,16 @@ export interface AgentContextLayerPluginStart {
     spaceId: string;
     esClient: IScopedClusterClient;
     request: KibanaRequest;
-    skipContent?: boolean;
+    /**
+     * Optional subset of fields to return. Omit for all fields. Valid optional
+     * values: `'content'`, `'description'`, `'tags'`, `'references'`.
+     */
+    fields?: string[];
+    /** Runtime-imposed per-type id-allowlist constraints. */
+    constraints?: SmlSearchConstraints;
+    /** Agent-discoverable filters (`types[]`, `tags[]`). */
     filters?: SmlSearchFilters;
-  }) => Promise<{ results: SmlSearchResult[]; total: number }>;
+  }) => Promise<{ results: SmlSearchResult[] }>;
 
   checkItemsAccess: (params: {
     ids: string[];

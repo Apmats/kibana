@@ -54,7 +54,7 @@ describe('usePrefetchSml', () => {
     expect(mockAutocomplete).toHaveBeenCalledWith({
       query: '*',
       size: SML_SEARCH_DEFAULT_SIZE,
-      filters: undefined,
+      scoping: undefined,
     });
   });
 
@@ -69,16 +69,16 @@ describe('usePrefetchSml', () => {
     expect(mockPrefetchQuery).not.toHaveBeenCalled();
   });
 
-  it('threads agent-derived filters into the prefetch call and query key', () => {
-    const filters = { [SmlSearchFilterType.connector]: { ids: ['gh-1'] } };
-    const { result } = renderHook(() => usePrefetchSml(filters));
+  it('threads agent-derived scoping into the prefetch call and query key', () => {
+    const scoping = { [SmlSearchFilterType.connector]: { ids: ['gh-1'] } };
+    const { result } = renderHook(() => usePrefetchSml(scoping));
 
     act(() => {
       result.current();
     });
 
     expect(mockPrefetchQuery).toHaveBeenCalledWith({
-      queryKey: queryKeys.sml.autocomplete('*', filters),
+      queryKey: queryKeys.sml.autocomplete('*', scoping),
       queryFn: expect.any(Function),
     });
     const queryFn = mockPrefetchQuery.mock.calls[0][0].queryFn as () => Promise<unknown>;
@@ -86,7 +86,7 @@ describe('usePrefetchSml', () => {
     expect(mockAutocomplete).toHaveBeenCalledWith({
       query: '*',
       size: SML_SEARCH_DEFAULT_SIZE,
-      filters,
+      scoping,
     });
   });
 });

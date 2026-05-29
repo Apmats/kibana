@@ -14,6 +14,7 @@ export {
   SmlSearchFilterType,
 } from '../common/http_api/sml';
 export type {
+  SmlSearchConstraints,
   SmlSearchFilters,
   SmlSearchHttpResponse,
   SmlSearchHttpResultItem,

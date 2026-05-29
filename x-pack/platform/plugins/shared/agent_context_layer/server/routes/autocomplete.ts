@@ -46,16 +46,24 @@ export const registerAutocompleteRoute = ({
         body: schema.object({
           query: schema.string({ minLength: 1, maxLength: SML_HTTP_AUTOCOMPLETE_QUERY_MAX_LENGTH }),
           size: schema.maybe(schema.number({ min: 1, max: SML_AUTOCOMPLETE_SIZE_MAX })),
-          // Per-type scoping (e.g. agent-centric connector allow-list). Same
-          // shape as POST /sml/_search so a single FE filter-builder can feed
-          // either route.
-          filters: schema.maybe(
+          // Runtime-imposed per-type constraints (e.g. agent-centric connector
+          // allow-list). Same shape as the `constraints` field on POST /sml/_search
+          // so a single FE scope-builder can feed either route.
+          constraints: schema.maybe(
             schema.recordOf(
               schema.literal(SmlSearchFilterType.connector),
               schema.object({
                 ids: schema.maybe(schema.arrayOf(schema.string(), { maxSize: 100 })),
               })
             )
+          ),
+          // Caller-supplied type/tag refinements — same shape as on POST /sml/_search.
+          // Useful for specialized UI pickers (e.g. connectors-only @ menu).
+          filters: schema.maybe(
+            schema.object({
+              types: schema.maybe(schema.arrayOf(schema.string(), { maxSize: 100 })),
+              tags: schema.maybe(schema.arrayOf(schema.string(), { maxSize: 100 })),
+            })
           ),
         }),
       },
@@ -75,25 +83,25 @@ export const registerAutocompleteRoute = ({
         }
 
         const sml = getSmlService();
-        const { query, size, filters } = request.body;
+        const { query, size, constraints, filters } = request.body;
         const esClient = coreContext.elasticsearch.client;
 
         const [, startDeps] = await coreSetup.getStartServices();
         const spaceId = startDeps.spaces?.spacesService?.getSpaceId(request) ?? 'default';
 
-        const { results, total } = await sml.autocomplete({
+        const { results } = await sml.autocomplete({
           query,
           size,
           spaceId,
           esClient,
           request,
+          constraints,
           filters,
         });
 
         const body: SmlAutocompleteHttpResponse = {
-          total,
-          results: results.map(({ id, type, origin_id, title, matched_discovery_labels }) => {
-            const item: SmlAutocompleteHttpResultItem = { id, type, origin_id, title };
+          results: results.map(({ id, type, origin, title, matched_discovery_labels }) => {
+            const item: SmlAutocompleteHttpResultItem = { id, type, origin, title };
             if (matched_discovery_labels && matched_discovery_labels.length > 0) {
               item.matched_discovery_labels = matched_discovery_labels;
             }

@@ -10,7 +10,7 @@ import { useDebouncedValue } from '@kbn/react-hooks';
 import { useQuery } from '@kbn/react-query';
 import { formatAgentBuilderErrorMessage } from '@kbn/agent-builder-browser';
 import { i18n } from '@kbn/i18n';
-import type { SmlSearchFilters } from '@kbn/agent-context-layer-plugin/public';
+import type { SmlSearchFilters, SmlSearchScoping } from '@kbn/agent-context-layer-plugin/public';
 import { SML_SEARCH_DEFAULT_SIZE } from '../../../services/sml/constants';
 import { queryKeys } from '../../query_keys';
 import { useAgentBuilderServices } from '../use_agent_builder_service';
@@ -27,7 +27,9 @@ const smlAutocompleteErrorToastTitle = i18n.translate(
 );
 
 export interface UseSmlAutocompleteOptions {
-  /** Per-type filters for SML autocomplete (e.g. agent-centric connector allow-list). */
+  /** Runtime-imposed per-type id-allowlist scoping (e.g. agent-centric connector allow-list). */
+  readonly scoping?: SmlSearchScoping;
+  /** Caller-supplied type/tag refinements (e.g. connectors-only picker). */
   readonly filters?: SmlSearchFilters;
 }
 
@@ -42,16 +44,18 @@ export const useSmlAutocomplete = (query: string, options?: UseSmlAutocompleteOp
   const { services } = useKibana();
   const { smlService } = useAgentBuilderServices();
   const debouncedQuery = useDebouncedValue(query, SML_AUTOCOMPLETE_DEBOUNCE_MS);
+  const scoping = options?.scoping;
   const filters = options?.filters;
 
   const normalized = useMemo(() => normalizeSmlSearchQuery(debouncedQuery), [debouncedQuery]);
 
   const { isError, isLoading, error, data } = useQuery({
-    queryKey: queryKeys.sml.autocomplete(normalized, filters),
+    queryKey: queryKeys.sml.autocomplete(normalized, scoping, filters),
     queryFn: () =>
       smlService.autocomplete({
         query: normalized,
         size: SML_SEARCH_DEFAULT_SIZE,
+        scoping,
         filters,
       }),
     staleTime: SML_AUTOCOMPLETE_STALE_TIME_MS,
@@ -70,7 +74,6 @@ export const useSmlAutocomplete = (query: string, options?: UseSmlAutocompleteOp
 
   return {
     results: data?.results ?? [],
-    total: data?.total ?? 0,
     isLoading,
     isError,
     error,
