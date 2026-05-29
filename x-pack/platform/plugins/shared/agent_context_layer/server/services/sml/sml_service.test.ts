@@ -1295,7 +1295,7 @@ describe('SmlService', () => {
       });
     });
 
-    it('round-trips all new schema fields (origin, tags, discovery_labels, payload)', async () => {
+    it('round-trips all new schema fields (origin, tags, discovery_labels, extended_attrs)', async () => {
       const service = createSmlService();
       service.setup({ logger });
       const smlService = service.start({ logger });
@@ -1315,7 +1315,7 @@ describe('SmlService', () => {
                 description: 'sales summary',
                 tags: ['sales', 'executive'],
                 discovery_labels: [{ value: 'q3 sales', kind: 'tagline' }],
-                payload: { owner_team: 'sales-ops' },
+                extended_attrs: { owner_team: 'sales-ops' },
                 user_id: 'user-7',
                 references: [{ uri: 'category://sales' }],
                 created_at: '2026-04-01T00:00:00.000Z',
@@ -1344,7 +1344,7 @@ describe('SmlService', () => {
         description: 'sales summary',
         tags: ['sales', 'executive'],
         discovery_labels: [{ value: 'q3 sales', kind: 'tagline' }],
-        payload: { owner_team: 'sales-ops' },
+        extended_attrs: { owner_team: 'sales-ops' },
         user_id: 'user-7',
         references: [{ uri: 'category://sales' }],
         created_at: '2026-04-01T00:00:00.000Z',

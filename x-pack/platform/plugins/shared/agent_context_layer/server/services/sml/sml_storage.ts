@@ -66,7 +66,7 @@ const smlStorageSchemaProperties = {
       uri: types.keyword({}),
     },
   }),
-  payload: types.flattened({}),
+  extended_attrs: types.flattened({}),
   user_id: types.keyword({}),
   created_at: types.date({}),
   updated_at: types.date({}),

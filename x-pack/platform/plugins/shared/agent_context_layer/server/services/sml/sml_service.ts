@@ -988,8 +988,8 @@ const getDocumentsByIds = async ({
       if (source.discovery_labels !== undefined) {
         doc.discovery_labels = source.discovery_labels;
       }
-      if (source.payload !== undefined) {
-        doc.payload = source.payload;
+      if (source.extended_attrs !== undefined) {
+        doc.extended_attrs = source.extended_attrs;
       }
       if (source.user_id !== undefined) {
         doc.user_id = source.user_id;

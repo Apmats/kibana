@@ -170,7 +170,7 @@ describe('createSmlIndexer', () => {
       });
     });
 
-    it('create action: round-trips all new schema fields (tags, discovery_labels, payload, references, description, user_id)', async () => {
+    it('create action: round-trips all new schema fields (tags, discovery_labels, extended_attrs, references, description, user_id)', async () => {
       const bulkMock = jest.fn().mockResolvedValue({ errors: false, items: [] });
       const getClientMock = jest.fn().mockReturnValue({ bulk: bulkMock });
       (createSmlStorage as jest.Mock).mockReturnValue({ getClient: getClientMock });
@@ -187,7 +187,7 @@ describe('createSmlIndexer', () => {
               { value: 'q3 sales', kind: 'tagline' },
               { value: 'sales q3 dashboard', kind: 'nickname' },
             ],
-            payload: {
+            extended_attrs: {
               owner_team: 'sales-ops',
               fields: [{ name: 'revenue', type: 'currency' }],
             },
@@ -232,7 +232,7 @@ describe('createSmlIndexer', () => {
           { value: 'q3 sales', kind: 'tagline' },
           { value: 'sales q3 dashboard', kind: 'nickname' },
         ],
-        payload: {
+        extended_attrs: {
           owner_team: 'sales-ops',
           fields: [{ name: 'revenue', type: 'currency' }],
         },

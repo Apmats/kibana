@@ -150,8 +150,8 @@ class SmlIndexerImpl implements SmlIndexer {
         { value: chunk.type, kind: 'type' },
         ...(chunk.discovery_labels ?? []),
       ];
-      if (chunk.payload !== undefined) {
-        document.payload = chunk.payload;
+      if (chunk.extended_attrs !== undefined) {
+        document.extended_attrs = chunk.extended_attrs;
       }
       if (chunk.user_id !== undefined) {
         document.user_id = chunk.user_id;
