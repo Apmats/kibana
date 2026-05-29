@@ -67,7 +67,17 @@ export const registerSearchRoute = ({
             })
           ),
           fields: schema.maybe(
-            schema.arrayOf(schema.string(), { maxSize: 20 })
+            schema.arrayOf(
+              schema.oneOf([
+                schema.literal('content'),
+                schema.literal('description'),
+                schema.literal('tags'),
+                schema.literal('references'),
+                schema.literal('spaces'),
+                schema.literal('permissions'),
+              ]),
+              { maxSize: 6 }
+            )
           ),
         }),
       },
