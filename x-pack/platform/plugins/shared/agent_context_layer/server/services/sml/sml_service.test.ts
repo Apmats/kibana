@@ -24,16 +24,17 @@ const createMockEsClient = (): jest.Mocked<ElasticsearchClient> =>
     },
   } as unknown as jest.Mocked<ElasticsearchClient>);
 
-// Column order produced by buildSmlEsqlQuery. Rows must match this order.
-const makeEsqlColumns = (includeContent = true) => [
+// Column order produced by buildSmlEsqlQuery. permissions is always present;
+// spaces and other optional fields appear only when explicitly requested.
+const makeEsqlColumns = (includeContent = true, includeSpaces = false) => [
   { name: 'id', type: 'keyword' },
   { name: 'type', type: 'keyword' },
   { name: 'title', type: 'text' },
-  { name: 'origin_id', type: 'keyword' },
+  { name: 'origin_uri', type: 'keyword' },
   { name: 'description', type: 'text' },
   { name: 'tags', type: 'keyword' },
   { name: 'ref_uris', type: 'keyword' },
-  { name: 'spaces', type: 'keyword' },
+  ...(includeSpaces ? [{ name: 'spaces', type: 'keyword' }] : []),
   { name: 'permissions', type: 'keyword' },
   ...(includeContent ? [{ name: 'content', type: 'text' }] : []),
 ];
@@ -44,20 +45,23 @@ const makeEsqlRow = (
   type: string,
   title: string,
   originId: string,
-  spaces: string | string[],
   permissions: string | string[],
   {
+    spaces,
     description,
     tags,
     refUris,
     content,
     includeContent = true,
+    includeSpaces = false,
   }: {
+    spaces?: string | string[];
     description?: string;
     tags?: string[] | null;
     refUris?: string[] | null;
     content?: string;
     includeContent?: boolean;
+    includeSpaces?: boolean;
   } = {}
 ): unknown[] => [
   id,
@@ -67,7 +71,7 @@ const makeEsqlRow = (
   description ?? null,
   tags ?? null,
   refUris ?? null,
-  spaces,
+  ...(includeSpaces ? [spaces ?? null] : []),
   permissions,
   ...(includeContent ? [content ?? null] : []),
 ];
@@ -253,16 +257,18 @@ describe('SmlService', () => {
       // Hybrid search path: FORK + FUSE present
       expect(esql).toContain('| FORK');
       expect(esql).toContain('| FUSE');
+      // METADATA required for FUSE (_id, _index, _score columns)
+      expect(esql).toContain('METADATA _id, _index, _score');
       // Space filter uses MV_CONTAINS (not `==`) for multi-value safety
       expect(esql).toContain('| WHERE MV_CONTAINS(spaces, ?)');
-      // All six MATCH branches: BM25 fields + semantic multi-fields
-      expect(esql).toContain('MATCH(title, ?)');
-      expect(esql).toContain('MATCH(description, ?)');
-      expect(esql).toContain('MATCH(content, ?)');
-      expect(esql).toContain('MATCH(title.semantic, ?)');
-      expect(esql).toContain('MATCH(description.semantic, ?)');
-      expect(esql).toContain('MATCH(content.semantic, ?)');
-      // Overfetch limit: size(10) × MAX_SCAN_MULTIPLIER(10)
+      // Two FORK branches: BM25 (OR across text fields) + semantic (OR across semantic multi-fields)
+      expect(esql).toContain(
+        '(WHERE MATCH(title, ?) OR MATCH(description, ?) OR MATCH(content, ?) | LIMIT 100)'
+      );
+      expect(esql).toContain(
+        '(WHERE MATCH(title.semantic, ?) OR MATCH(description.semantic, ?) OR MATCH(content.semantic, ?) | LIMIT 100)'
+      );
+      // Outer overfetch limit after FUSE: size(10) × MAX_SCAN_MULTIPLIER(10)
       expect(esql).toContain('| LIMIT 100');
       // Sorted by relevance score after FUSE
       expect(esql).toContain('| SORT _score DESC');
@@ -317,7 +323,7 @@ describe('SmlService', () => {
       expect(esql).toContain('| SORT id ASC');
     });
 
-    it('threads scoping and agent filters as WHERE clauses with positional params', async () => {
+    it('threads constraints and agent filters as WHERE clauses with positional params', async () => {
       const service = createSmlService();
       service.setup({ logger });
       const smlService = service.start({ logger });
@@ -333,7 +339,7 @@ describe('SmlService', () => {
         spaceId: 'default',
         esClient: scopedClient,
         request,
-        scoping: { [SmlSearchFilterType.connector]: { ids: ['gh-1'] } },
+        constraints: { [SmlSearchFilterType.connector]: { ids: ['gh-1'] } },
         filters: { types: ['connector', 'dashboard'], tags: ['production'] },
       });
 
@@ -342,7 +348,7 @@ describe('SmlService', () => {
         params?: unknown[];
       };
 
-      // Scoping WHERE clause: exclude type OR allow specific origin_ids
+      // Constraints WHERE clause: exclude type OR allow specific origin_ids
       expect(esql).toContain('| WHERE type != ? OR origin_id IN (?)');
       // Agent type filter
       expect(esql).toContain('| WHERE type IN (?, ?)');
@@ -351,8 +357,8 @@ describe('SmlService', () => {
 
       // Positional params: [spaceId, scopeTypeId, scopeId, filterType1, filterType2, filterTag, ...queryX6]
       expect(params![0]).toBe('default'); // spaceId
-      expect(params![1]).toBe('connector'); // scoping typeId
-      expect(params![2]).toBe('gh-1'); // scoping id
+      expect(params![1]).toBe('connector'); // constraints typeId
+      expect(params![2]).toBe('gh-1'); // constraints id
       expect(params![3]).toBe('connector'); // filter type 1
       expect(params![4]).toBe('dashboard'); // filter type 2
       expect(params![5]).toBe('production'); // filter tag
@@ -382,43 +388,30 @@ describe('SmlService', () => {
         query: string;
         params?: unknown[];
       };
-      // All six MATCH branches present
-      for (const field of [
-        'title',
-        'description',
-        'content',
-        'title.semantic',
-        'description.semantic',
-        'content.semantic',
-      ]) {
-        expect(esql).toContain(`MATCH(${field}, ?)`);
-      }
+      // Both FORK branches present with all six fields
+      expect(esql).toContain('MATCH(title, ?)');
+      expect(esql).toContain('MATCH(description, ?)');
+      expect(esql).toContain('MATCH(content, ?)');
+      expect(esql).toContain('MATCH(title.semantic, ?)');
+      expect(esql).toContain('MATCH(description.semantic, ?)');
+      expect(esql).toContain('MATCH(content.semantic, ?)');
       // Query repeated six times (once per MATCH branch), after the spaceId param
       const queryString = 'how is the fleet performing this quarter';
       expect(params!.slice(1)).toEqual(Array(6).fill(queryString));
     });
 
-    it('maps ES|QL tabular response to the SmlSearchResult shape (includes content by default)', async () => {
+    it('returns baseline fields only when no fields param is provided', async () => {
       const service = createSmlService();
       service.setup({ logger });
       const smlService = service.start({ logger });
 
       esqlQueryMock.mockResolvedValue({
-        columns: makeEsqlColumns(true),
+        columns: makeEsqlColumns(false),
         values: [
-          makeEsqlRow(
-            'chunk-1',
-            'lens',
-            'My Viz',
-            'ref-1',
-            ['default'],
-            ['saved_object:lens/get'],
-            {
-              description: 'A lens viz',
-              refUris: ['lens:other:uuid'],
-              content: 'content text',
-            }
-          ),
+          makeEsqlRow('chunk-1', 'lens', 'My Viz', 'ref-1', ['saved_object:lens/get'], {
+            description: 'A lens viz',
+            includeContent: false,
+          }),
         ],
       } as any);
 
@@ -435,16 +428,61 @@ describe('SmlService', () => {
         id: 'chunk-1',
         type: 'lens',
         title: 'My Viz',
-        origin_id: 'ref-1',
+        origin: { uri: 'ref-1' },
+        description: 'A lens viz',
+      });
+      expect(result.results[0]).not.toHaveProperty('content');
+      expect(result.results[0]).not.toHaveProperty('tags');
+      expect(result.results[0]).not.toHaveProperty('spaces');
+      expect(result.results[0]).not.toHaveProperty('permissions');
+
+      // content not in KEEP when fields is omitted
+      const { query: esql } = esqlQueryMock.mock.calls[0]![0]! as { query: string };
+      expect(esql).not.toMatch(/\bKEEP\b.*\bcontent\b/);
+    });
+
+    it('returns requested optional fields when fields param is provided', async () => {
+      const service = createSmlService();
+      service.setup({ logger });
+      const smlService = service.start({ logger });
+
+      esqlQueryMock.mockResolvedValue({
+        columns: makeEsqlColumns(true),
+        values: [
+          makeEsqlRow(
+            'chunk-1',
+            'lens',
+            'My Viz',
+            'ref-1',
+            ['saved_object:lens/get'],
+            { description: 'A lens viz', refUris: ['lens:other:uuid'], content: 'content text' }
+          ),
+        ],
+      } as any);
+
+      const result = await smlService.search({
+        query: 'viz',
+        size: 10,
+        spaceId: 'default',
+        esClient: scopedClient,
+        request,
+        fields: ['content', 'description', 'references'],
+      });
+
+      expect(result.results[0]).toEqual({
+        id: 'chunk-1',
+        type: 'lens',
+        title: 'My Viz',
+        origin: { uri: 'ref-1' },
         content: 'content text',
         description: 'A lens viz',
         references: [{ uri: 'lens:other:uuid' }],
-        spaces: ['default'],
-        permissions: ['saved_object:lens/get'],
       });
+      expect(result.results[0]).not.toHaveProperty('spaces');
+      expect(result.results[0]).not.toHaveProperty('permissions');
     });
 
-    it('omits content from result when skipContent is true', async () => {
+    it('returns only the requested fields when fields param is provided', async () => {
       const service = createSmlService();
       service.setup({ logger });
       const smlService = service.start({ logger });
@@ -452,7 +490,7 @@ describe('SmlService', () => {
       esqlQueryMock.mockResolvedValue({
         columns: makeEsqlColumns(false),
         values: [
-          makeEsqlRow('chunk-bare', 'connector', 'Bare', 'b1', ['default'], [], {
+          makeEsqlRow('chunk-bare', 'connector', 'Bare', 'b1', [], {
             includeContent: false,
           }),
         ],
@@ -464,13 +502,14 @@ describe('SmlService', () => {
         spaceId: 'default',
         esClient: scopedClient,
         request,
-        skipContent: true,
+        fields: ['description'],
       });
       expect(result.results[0]).not.toHaveProperty('content');
 
-      // content column is excluded from KEEP when skipContent is true
+      // Only requested optional fields appear in KEEP; content is absent
       const { query: esql } = esqlQueryMock.mock.calls[0]![0]! as { query: string };
       expect(esql).not.toMatch(/\bKEEP\b.*\bcontent\b/);
+      expect(esql).toContain('description');
     });
 
     it('surfaces description, tags, and references on hits (compact LLM shape)', async () => {
@@ -486,7 +525,6 @@ describe('SmlService', () => {
             'dashboard',
             'Sales Q3',
             'dash-100',
-            ['default'],
             ['saved_object:dashboard/get'],
             {
               description: 'sales summary',
@@ -504,6 +542,7 @@ describe('SmlService', () => {
         spaceId: 'default',
         esClient: scopedClient,
         request,
+        fields: ['content', 'tags', 'references'],
       });
 
       expect(result.results).toHaveLength(1);
@@ -511,14 +550,14 @@ describe('SmlService', () => {
         id: 'chunk-2',
         type: 'dashboard',
         title: 'Sales Q3',
-        origin_id: 'dash-100',
+        origin: { uri: 'dash-100' },
         content: 'sales content',
         description: 'sales summary',
         tags: ['sales', 'executive'],
         references: [{ uri: 'category://sales' }],
-        spaces: ['default'],
-        permissions: ['saved_object:dashboard/get'],
       });
+      expect(result.results[0]).not.toHaveProperty('spaces');
+      expect(result.results[0]).not.toHaveProperty('permissions');
     });
 
     it('returns multiple results from ES|QL tabular response', async () => {
@@ -529,8 +568,8 @@ describe('SmlService', () => {
       esqlQueryMock.mockResolvedValue({
         columns: makeEsqlColumns(true),
         values: [
-          makeEsqlRow('chunk-1', 'lens', 'A', 'r1', [], [], { content: '' }),
-          makeEsqlRow('chunk-2', 'lens', 'B', 'r2', [], [], { content: '' }),
+          makeEsqlRow('chunk-1', 'lens', 'A', 'r1', [], { content: '' }),
+          makeEsqlRow('chunk-2', 'lens', 'B', 'r2', [], { content: '' }),
         ],
       } as any);
 
@@ -598,20 +637,10 @@ describe('SmlService', () => {
       esqlQueryMock.mockResolvedValue({
         columns: makeEsqlColumns(true),
         values: [
-          makeEsqlRow('chunk-1', 'lens', 'Lens', 'r1', ['default'], ['saved_object:lens/get'], {
+          makeEsqlRow('chunk-1', 'lens', 'Lens', 'r1', ['saved_object:lens/get'], { content: '' }),
+          makeEsqlRow('chunk-2', 'dashboard', 'Dashboard', 'r2', ['saved_object:dashboard/get'], {
             content: '',
           }),
-          makeEsqlRow(
-            'chunk-2',
-            'dashboard',
-            'Dashboard',
-            'r2',
-            ['default'],
-            ['saved_object:dashboard/get'],
-            {
-              content: '',
-            }
-          ),
         ],
       } as any);
 
@@ -636,20 +665,10 @@ describe('SmlService', () => {
       esqlQueryMock.mockResolvedValue({
         columns: makeEsqlColumns(true),
         values: [
-          makeEsqlRow('chunk-1', 'lens', 'Lens', 'r1', ['default'], ['saved_object:lens/get'], {
+          makeEsqlRow('chunk-1', 'lens', 'Lens', 'r1', ['saved_object:lens/get'], { content: '' }),
+          makeEsqlRow('chunk-2', 'dashboard', 'Dashboard', 'r2', ['saved_object:dashboard/get'], {
             content: '',
           }),
-          makeEsqlRow(
-            'chunk-2',
-            'dashboard',
-            'Dashboard',
-            'r2',
-            ['default'],
-            ['saved_object:dashboard/get'],
-            {
-              content: '',
-            }
-          ),
         ],
       } as any);
 
@@ -752,7 +771,7 @@ describe('SmlService', () => {
           ],
         },
       });
-      expect(call._source).toEqual(['id', 'type', 'title', 'origin_id', 'spaces', 'permissions']);
+      expect(call._source).toEqual(['id', 'type', 'title', 'origin', 'spaces', 'permissions']);
     });
 
     it('uses match_all for query "*"', async () => {
@@ -774,7 +793,7 @@ describe('SmlService', () => {
       expect(call.query!.bool!.must).toEqual([{ match_all: {} }]);
     });
 
-    it('threads per-type scoping through buildScopingFilter into the ES filter clauses', async () => {
+    it('threads per-type constraints through buildConstraintsFilter into the ES filter clauses', async () => {
       const service = createSmlService();
       service.setup({ logger });
       const smlService = service.start({ logger });
@@ -787,12 +806,12 @@ describe('SmlService', () => {
         spaceId: 'default',
         esClient: scopedClient,
         request,
-        scoping: { [SmlSearchFilterType.connector]: { ids: ['gh-1', 'jira-1'] } },
+        constraints: { [SmlSearchFilterType.connector]: { ids: ['gh-1', 'jira-1'] } },
       });
 
       const call = esClient.search.mock.calls[0]![0]!;
       const filterClauses = call.query!.bool!.filter as Array<Record<string, unknown>>;
-      // First clause is the space filter; second is the scoping filter.
+      // First clause is the space filter; second is the constraints filter.
       expect(filterClauses).toHaveLength(2);
       expect(filterClauses[1]).toEqual({
         bool: {
@@ -826,7 +845,7 @@ describe('SmlService', () => {
                 id: 'chunk-1',
                 type: 'connector',
                 title: 'GitHub Connector',
-                origin_id: 'gh-1',
+                origin: { uri: 'gh-1' },
                 spaces: ['default'],
                 permissions: [],
               },
@@ -874,7 +893,7 @@ describe('SmlService', () => {
         id: 'chunk-1',
         type: 'connector',
         title: 'GitHub Connector',
-        origin_id: 'gh-1',
+        origin: { uri: 'gh-1' },
         spaces: ['default'],
         permissions: [],
         matched_discovery_labels: [
@@ -902,7 +921,7 @@ describe('SmlService', () => {
                 id: 'chunk-2',
                 type: 'dashboard',
                 title: 'Sales Q3',
-                origin_id: 'dash-1',
+                origin: { uri: 'dash-1' },
                 spaces: ['default'],
                 permissions: [],
               },
@@ -924,7 +943,7 @@ describe('SmlService', () => {
         id: 'chunk-2',
         type: 'dashboard',
         title: 'Sales Q3',
-        origin_id: 'dash-1',
+        origin: { uri: 'dash-1' },
         spaces: ['default'],
         permissions: [],
       });
@@ -966,7 +985,7 @@ describe('SmlService', () => {
                 id: 'chunk-allowed',
                 type: 'dashboard',
                 title: 'Allowed',
-                origin_id: 'd1',
+                origin: { uri: 'd1' },
                 spaces: ['default'],
                 permissions: ['saved_object:dashboard/get'],
               },
@@ -977,7 +996,7 @@ describe('SmlService', () => {
                 id: 'chunk-denied',
                 type: 'connector',
                 title: 'Denied',
-                origin_id: 'c1',
+                origin: { uri: 'c1' },
                 spaces: ['default'],
                 permissions: ['saved_object:connector/get'],
               },
@@ -1211,6 +1230,7 @@ describe('SmlService', () => {
                 type: 'lens',
                 title: 'Doc 1',
                 origin_id: 'ref-1',
+                origin: { uri: 'ref-1' },
                 content: 'content 1',
                 created_at: '2024-01-01',
                 updated_at: '2024-01-02',
@@ -1224,6 +1244,7 @@ describe('SmlService', () => {
                 type: 'dashboard',
                 title: 'Doc 2',
                 origin_id: 'ref-2',
+                origin: { uri: 'ref-2' },
                 content: 'content 2',
                 description: 'dash desc',
                 user_id: 'u2',
@@ -1250,6 +1271,7 @@ describe('SmlService', () => {
         type: 'lens',
         title: 'Doc 1',
         origin_id: 'ref-1',
+        origin: { uri: 'ref-1' },
         content: 'content 1',
         created_at: '2024-01-01',
         updated_at: '2024-01-02',
@@ -1261,6 +1283,7 @@ describe('SmlService', () => {
         type: 'dashboard',
         title: 'Doc 2',
         origin_id: 'ref-2',
+        origin: { uri: 'ref-2' },
         content: 'content 2',
         description: 'dash desc',
         user_id: 'u2',
@@ -1287,6 +1310,7 @@ describe('SmlService', () => {
                 type: 'dashboard',
                 title: 'Sales Q3',
                 origin_id: 'dash-100',
+                origin: { uri: 'dash-100' },
                 content: 'sales content',
                 description: 'sales summary',
                 tags: ['sales', 'executive'],
@@ -1315,6 +1339,7 @@ describe('SmlService', () => {
         type: 'dashboard',
         title: 'Sales Q3',
         origin_id: 'dash-100',
+        origin: { uri: 'dash-100' },
         content: 'sales content',
         description: 'sales summary',
         tags: ['sales', 'executive'],

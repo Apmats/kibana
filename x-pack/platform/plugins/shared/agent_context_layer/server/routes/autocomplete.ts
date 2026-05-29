@@ -46,10 +46,10 @@ export const registerAutocompleteRoute = ({
         body: schema.object({
           query: schema.string({ minLength: 1, maxLength: SML_HTTP_AUTOCOMPLETE_QUERY_MAX_LENGTH }),
           size: schema.maybe(schema.number({ min: 1, max: SML_AUTOCOMPLETE_SIZE_MAX })),
-          // Runtime-imposed per-type scoping (e.g. agent-centric connector
-          // allow-list). Same shape as the `scoping` field on POST /sml/_search
+          // Runtime-imposed per-type constraints (e.g. agent-centric connector
+          // allow-list). Same shape as the `constraints` field on POST /sml/_search
           // so a single FE scope-builder can feed either route.
-          scoping: schema.maybe(
+          constraints: schema.maybe(
             schema.recordOf(
               schema.literal(SmlSearchFilterType.connector),
               schema.object({
@@ -83,7 +83,7 @@ export const registerAutocompleteRoute = ({
         }
 
         const sml = getSmlService();
-        const { query, size, scoping, filters } = request.body;
+        const { query, size, constraints, filters } = request.body;
         const esClient = coreContext.elasticsearch.client;
 
         const [, startDeps] = await coreSetup.getStartServices();
@@ -95,13 +95,13 @@ export const registerAutocompleteRoute = ({
           spaceId,
           esClient,
           request,
-          scoping,
+          constraints,
           filters,
         });
 
         const body: SmlAutocompleteHttpResponse = {
-          results: results.map(({ id, type, origin_id, title, matched_discovery_labels }) => {
-            const item: SmlAutocompleteHttpResultItem = { id, type, origin_id, title };
+          results: results.map(({ id, type, origin, title, matched_discovery_labels }) => {
+            const item: SmlAutocompleteHttpResultItem = { id, type, origin, title };
             if (matched_discovery_labels && matched_discovery_labels.length > 0) {
               item.matched_discovery_labels = matched_discovery_labels;
             }

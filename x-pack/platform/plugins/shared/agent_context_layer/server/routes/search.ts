@@ -42,9 +42,9 @@ export const registerSearchRoute = ({
           query: schema.string({ minLength: 1, maxLength: SML_HTTP_SEARCH_QUERY_MAX_LENGTH }),
           size: schema.maybe(schema.number({ min: 1, max: SML_SEARCH_SIZE_MAX })),
           // Runtime-imposed per-type id-allowlist (e.g. agent-centric connector
-          // allow-list). Renamed from `filters` to `scoping` to make the trust
+          // allow-list). Renamed from `filters` to `constraints` to make the trust
           // boundary explicit alongside the agent-discoverable `filters`.
-          scoping: schema.maybe(
+          constraints: schema.maybe(
             schema.recordOf(
               schema.literal(SmlSearchFilterType.connector),
               schema.object({
@@ -55,7 +55,7 @@ export const registerSearchRoute = ({
             )
           ),
           // Agent-discoverable filters: refinements the LLM tool path supplies.
-          // ANDed with `scoping`; agent filters cannot widen runtime scope.
+          // ANDed with `constraints`; agent filters cannot widen runtime scope.
           filters: schema.maybe(
             schema.object({
               types: schema.maybe(
@@ -66,7 +66,9 @@ export const registerSearchRoute = ({
               ),
             })
           ),
-          skip_content: schema.maybe(schema.boolean()),
+          fields: schema.maybe(
+            schema.arrayOf(schema.string(), { maxSize: 20 })
+          ),
         }),
       },
       options: { access: 'internal' },
@@ -85,7 +87,7 @@ export const registerSearchRoute = ({
         }
 
         const sml = getSmlService();
-        const { query, size, skip_content: skipContent, scoping, filters } = request.body;
+        const { query, size, fields, constraints, filters } = request.body;
         const esClient = coreContext.elasticsearch.client;
 
         const [, startDeps] = await coreSetup.getStartServices();
@@ -94,11 +96,11 @@ export const registerSearchRoute = ({
         const { results } = await sml.search({
           query,
           size,
-          skipContent,
+          fields,
           spaceId,
           esClient,
           request,
-          scoping,
+          constraints,
           filters,
         });
 
@@ -107,7 +109,7 @@ export const registerSearchRoute = ({
             const item: SmlSearchHttpResultItem = {
               id: hit.id,
               type: hit.type,
-              origin_id: hit.origin_id,
+              origin: hit.origin,
               title: hit.title,
             };
             if (hit.content !== undefined) item.content = hit.content;

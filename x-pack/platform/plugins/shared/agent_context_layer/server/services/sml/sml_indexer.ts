@@ -129,6 +129,7 @@ class SmlIndexerImpl implements SmlIndexer {
         type: chunk.type,
         title: chunk.title,
         origin_id: originId,
+        origin: { uri: `${attachmentType}://${originId}` },
         content: chunk.content,
         created_at: now,
         updated_at: now,

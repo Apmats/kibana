@@ -20,7 +20,7 @@ import type {
   SmlTypeDefinition,
   SmlSearchResult,
   SmlSearchFilters,
-  SmlSearchScoping,
+  SmlSearchConstraints,
   SmlDocument,
   SmlIndexAction,
 } from './services/sml/types';
@@ -48,10 +48,13 @@ export interface AgentContextLayerPluginStart {
     spaceId: string;
     esClient: IScopedClusterClient;
     request: KibanaRequest;
-    /** When true, omits `content` from each result (smaller payload). */
-    skipContent?: boolean;
-    /** Runtime-imposed per-type id-allowlist scoping. */
-    scoping?: SmlSearchScoping;
+    /**
+     * Optional subset of fields to return. Omit for all fields. Valid optional
+     * values: `'content'`, `'description'`, `'tags'`, `'references'`.
+     */
+    fields?: string[];
+    /** Runtime-imposed per-type id-allowlist constraints. */
+    constraints?: SmlSearchConstraints;
     /** Agent-discoverable filters (`types[]`, `tags[]`). */
     filters?: SmlSearchFilters;
   }) => Promise<{ results: SmlSearchResult[] }>;

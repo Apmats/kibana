@@ -13,7 +13,7 @@ import type {
 import type { Logger } from '@kbn/logging';
 import type { KibanaRequest } from '@kbn/core-http-server';
 import type { AttachmentInput } from '@kbn/agent-builder-common/attachments';
-import type { SmlSearchFilters, SmlSearchScoping } from '../../../common/http_api/sml';
+import type { SmlSearchFilters, SmlSearchConstraints } from '../../../common/http_api/sml';
 
 /**
  * One entry in {@link SmlChunk.discovery_labels}. `value` is what the autocomplete
@@ -162,6 +162,8 @@ export interface SmlDocument {
   title: string;
   /** Origin ID (e.g., saved object ID) of the underlying element. */
   origin_id: string;
+  /** Self-describing URI for the origin, constructed as `${type}://${origin_id}` at index time. */
+  origin: { uri: string };
   /** Searchable content (`semantic_text` in the index) */
   content: string;
   /** Semantic summary (`semantic_text` in the index) */
@@ -199,19 +201,21 @@ export interface SmlDocument {
  * post-hoc authorization filtering; downstream consumers should not expose it
  * in their response shape.
  *
- * `content` is omitted when the caller passes `skipContent: true`.
+ * Optional fields (`content`, `description`, `tags`, `references`) are omitted
+ * when the caller passes a `fields` array that excludes them. `spaces` and
+ * `permissions` are internal pipeline details — not present in results.
  */
 export interface SmlSearchResult {
   id: string;
   type: string;
   title: string;
-  origin_id: string;
+  origin: { uri: string };
   content?: string;
   description?: string;
   references?: Array<{ uri: string }>;
   tags?: string[];
-  spaces: string[];
-  permissions: string[];
+  spaces?: string[];
+  permissions?: string[];
 }
 
 /**
@@ -238,7 +242,7 @@ export interface SmlAutocompleteResult {
   id: string;
   type: string;
   title: string;
-  origin_id: string;
+  origin: { uri: string };
   /** Used server-side for permission filtering; not exposed in the HTTP response. */
   permissions: string[];
   /** Used server-side for space filtering; not exposed in the HTTP response. */
@@ -293,7 +297,7 @@ export interface SmlCrawler {
  * Filter parameters for SML search.
  * Re-exported from the shared HTTP API types so server and client use a single definition.
  */
-export type { SmlSearchFilters, SmlSearchScoping } from '../../../common/http_api/sml';
+export type { SmlSearchFilters, SmlSearchConstraints } from '../../../common/http_api/sml';
 
 /**
  * SML service interface — exposed on the plugin start contract.
@@ -303,10 +307,10 @@ export interface SmlService {
   getCrawler: () => SmlCrawler;
   /**
    * Hybrid search the SML index (RRF over BM25 + semantic), filtering results
-   * by space, scoping, agent-supplied filters, and permissions.
+   * by space, constraints, agent-supplied filters, and permissions.
    *
-   * `scoping` and `filters` are kept as separate parameters so the trust
-   * boundary is visible at the API layer: `scoping` is runtime-imposed
+   * `constraints` and `filters` are kept as separate parameters so the trust
+   * boundary is visible at the API layer: `constraints` is runtime-imposed
    * (wrapper-applied from caller context — agent SO `connector_ids`, future
    * allowed-indices, RBAC) and the agent can't bypass it; `filters` is the
    * agent-discoverable refinement (`types[]`, `tags[]`). Both are combined
@@ -318,10 +322,14 @@ export interface SmlService {
     spaceId: string;
     esClient: IScopedClusterClient;
     request: KibanaRequest;
-    /** When true, omits `content` from each result (smaller payload). */
-    skipContent?: boolean;
-    /** Runtime-imposed per-type id-allowlist scoping. See {@link SmlSearchScoping}. */
-    scoping?: SmlSearchScoping;
+    /**
+     * Optional fields to include beyond the baseline (`id`, `type`, `title`,
+     * `origin_id`, `description`). Valid opt-in values: `'content'`, `'tags'`,
+     * `'references'`, `'spaces'`, `'permissions'`.
+     */
+    fields?: string[];
+    /** Runtime-imposed per-type id-allowlist constraints. See {@link SmlSearchConstraints}. */
+    constraints?: SmlSearchConstraints;
     /** Agent-discoverable filters. See {@link SmlSearchFilters}. */
     filters?: SmlSearchFilters;
   }) => Promise<{ results: SmlSearchResult[] }>;
@@ -331,7 +339,7 @@ export interface SmlService {
    * `multi_match bool_prefix operator: and` against `discovery_labels.value`
    * (search_as_you_type) and its `_2gram` / `_3gram` subfields. Returns per-row
    * provenance for UI badges. Filters by space and permissions the same way
-   * as `search`, and accepts the same per-type `scoping` and caller-supplied
+   * as `search`, and accepts the same per-type `constraints` and caller-supplied
    * `filters` so a specialized UI picker (e.g. connectors-only or dashboards-only
    * @ menu) can restrict results without any LLM involvement.
    */
@@ -341,8 +349,8 @@ export interface SmlService {
     spaceId: string;
     esClient: IScopedClusterClient;
     request: KibanaRequest;
-    /** Runtime-imposed per-type id-allowlist scoping. See {@link SmlSearchScoping}. */
-    scoping?: SmlSearchScoping;
+    /** Runtime-imposed per-type id-allowlist constraints. See {@link SmlSearchConstraints}. */
+    constraints?: SmlSearchConstraints;
     /** Caller-supplied type/tag refinements. See {@link SmlSearchFilters}. */
     filters?: SmlSearchFilters;
   }) => Promise<{ results: SmlAutocompleteResult[] }>;

@@ -84,7 +84,7 @@ describe('registerAutocompleteRoute', () => {
         id: 'chunk-1',
         type: 'connector',
         title: 'GitHub Connector',
-        origin_id: 'gh-1',
+        origin: { uri: 'gh-1' },
         spaces: ['test-space'],
         permissions: [],
         matched_discovery_labels: [
@@ -102,7 +102,7 @@ describe('registerAutocompleteRoute', () => {
           {
             id: 'chunk-1',
             type: 'connector',
-            origin_id: 'gh-1',
+            origin: { uri: 'gh-1' },
             title: 'GitHub Connector',
             matched_discovery_labels: [
               { value: 'GitHub Connector', kind: 'title' },
@@ -120,7 +120,7 @@ describe('registerAutocompleteRoute', () => {
         id: 'chunk-2',
         type: 'dashboard',
         title: 'Sales Q3',
-        origin_id: 'dash-1',
+        origin: { uri: 'dash-1' },
         spaces: ['test-space'],
         permissions: [],
       },
@@ -139,7 +139,7 @@ describe('registerAutocompleteRoute', () => {
         id: 'chunk-3',
         type: 'visualization',
         title: 'V',
-        origin_id: 'v-1',
+        origin: { uri: 'v-1' },
         spaces: ['test-space'],
         permissions: ['saved_object:visualization/get'],
       },

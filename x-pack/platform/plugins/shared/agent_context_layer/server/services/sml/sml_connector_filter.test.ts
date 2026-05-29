@@ -6,34 +6,34 @@
  */
 
 import { SmlSearchFilterType } from '../../../common/http_api/sml';
-import { buildAgentFilters, buildScopingFilter } from './sml_service';
+import { buildAgentFilters, buildConstraintsFilter } from './sml_service';
 
-// buildScopingFilter is designed to combine clauses from multiple
+// buildConstraintsFilter is designed to combine clauses from multiple
 // SmlSearchFilterType values. When the enum grows beyond 'connector', add
 // multi-type tests here.
 
-describe('buildScopingFilter', () => {
-  it('returns undefined when scoping is undefined', () => {
-    expect(buildScopingFilter(undefined)).toBeUndefined();
+describe('buildConstraintsFilter', () => {
+  it('returns undefined when constraints is undefined', () => {
+    expect(buildConstraintsFilter(undefined)).toBeUndefined();
   });
 
-  it('returns undefined when scoping is empty', () => {
-    expect(buildScopingFilter({})).toBeUndefined();
+  it('returns undefined when constraints is empty', () => {
+    expect(buildConstraintsFilter({})).toBeUndefined();
   });
 
   it('returns undefined when type criteria has no ids', () => {
-    expect(buildScopingFilter({ [SmlSearchFilterType.connector]: {} })).toBeUndefined();
+    expect(buildConstraintsFilter({ [SmlSearchFilterType.connector]: {} })).toBeUndefined();
   });
 
   it('excludes the type entirely when ids is empty', () => {
-    const filter = buildScopingFilter({ [SmlSearchFilterType.connector]: { ids: [] } });
+    const filter = buildConstraintsFilter({ [SmlSearchFilterType.connector]: { ids: [] } });
     expect(filter).toEqual({
       bool: { must_not: [{ term: { type: 'connector' } }] },
     });
   });
 
   it('returns a filter for a single type with ids', () => {
-    const filter = buildScopingFilter({
+    const filter = buildConstraintsFilter({
       [SmlSearchFilterType.connector]: { ids: ['conn-1', 'conn-2'] },
     });
     expect(filter).toEqual({

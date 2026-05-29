@@ -83,13 +83,11 @@ describe('registerSearchRoute', () => {
         id: 'chunk-1',
         type: 'visualization',
         title: 'Test Viz',
-        origin_id: 'viz-1',
+        origin: { uri: 'viz-1' },
         content: 'test content',
         description: 'A test viz',
         tags: ['demo'],
         references: [{ uri: 'dashboard://abc' }],
-        spaces: ['test-space'],
-        permissions: [],
       },
     ];
     mockSmlService.search.mockResolvedValue({ results: mockResults });
@@ -101,7 +99,7 @@ describe('registerSearchRoute', () => {
           {
             id: 'chunk-1',
             type: 'visualization',
-            origin_id: 'viz-1',
+            origin: { uri: 'viz-1' },
             title: 'Test Viz',
             content: 'test content',
             description: 'A test viz',
@@ -113,35 +111,40 @@ describe('registerSearchRoute', () => {
     });
   });
 
-  it('omits content from the HTTP response body when skipContent is true', async () => {
+  it('passes fields param to sml.search and omits unrequested fields from the response', async () => {
     const mockResults: SmlSearchResult[] = [
       {
         id: 'chunk-1',
         type: 'visualization',
         title: 'Test Viz',
-        origin_id: 'viz-1',
-        spaces: ['test-space'],
-        permissions: [],
+        origin: { uri: 'viz-1' },
       },
     ];
     mockSmlService.search.mockResolvedValue({ results: mockResults });
 
-    const response = await callHandler({ query: 'test', size: 10, skip_content: true });
+    const response = await callHandler({
+      query: 'test',
+      size: 10,
+      fields: ['description'],
+    });
+    expect(mockSmlService.search).toHaveBeenCalledWith(
+      expect.objectContaining({ fields: ['description'] })
+    );
     const body = response.ok.mock.calls[0][0]?.body as Record<string, unknown>;
     const results = (body as any).results;
     expect(results[0]).not.toHaveProperty('content');
   });
 
-  it('passes scoping and agent-supplied filters through to sml.search', async () => {
+  it('passes constraints and agent-supplied filters through to sml.search', async () => {
     mockSmlService.search.mockResolvedValue({ results: [] });
     await callHandler({
       query: 'test',
-      scoping: { connector: { ids: ['gh-1'] } },
+      constraints: { connector: { ids: ['gh-1'] } },
       filters: { types: ['dashboard'], tags: ['production'] },
     });
     expect(mockSmlService.search).toHaveBeenCalledWith(
       expect.objectContaining({
-        scoping: { connector: { ids: ['gh-1'] } },
+        constraints: { connector: { ids: ['gh-1'] } },
         filters: { types: ['dashboard'], tags: ['production'] },
       })
     );

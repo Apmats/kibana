@@ -6,24 +6,24 @@
  */
 
 /**
- * Allowed type keys for the runtime-imposed `scoping` parameter in SML search.
- * Extend this enum when adding new scopable SML types.
+ * Allowed type keys for the runtime-imposed `constraints` parameter in SML search.
+ * Extend this enum when adding new constrainable SML types.
  */
 export enum SmlSearchFilterType {
   connector = 'connector',
 }
 
 /**
- * Runtime-imposed, per-type id-allowlist scoping for SML search.
+ * Runtime-imposed, per-type id-allowlist constraints for SML search.
  *
  * Applied transparently by call wrappers from the caller's context (e.g. agent
  * SO `connector_ids`, future allowed-indices, allowed-skills, RBAC). Not
- * exposed to the LLM — the agent can't bypass scoping by construction.
+ * exposed to the LLM — the agent can't bypass constraints by construction.
  *
  * Keys must be values of {@link SmlSearchFilterType}.
  *
  * **Cross-type semantics:** constraints compose with OR across types — a record
- * satisfies scoping if it passes the constraint for its own type (or has no
+ * satisfies constraints if it passes the constraint for its own type (or has no
  * constraint for its type). Because a record has exactly one type, per-type
  * constraints are always mutually exclusive on any given hit; AND semantics
  * across types are not expressible and not needed.
@@ -33,14 +33,14 @@ export enum SmlSearchFilterType {
  * must be pre-computed into a flat list of allowed IDs before being passed here,
  * or handled as a separate named parameter on the service call.
  */
-export type SmlSearchScoping = Partial<Record<SmlSearchFilterType, { ids?: string[] }>>;
+export type SmlSearchConstraints = Partial<Record<SmlSearchFilterType, { ids?: string[] }>>;
 
 /**
  * Agent-discoverable refinements for SML search.
  *
  * Exposed in the LLM tool input schema; the agent picks which (if any) to
- * supply. Combined with {@link SmlSearchScoping} server-side — agent filters
- * never widen the runtime-imposed scope.
+ * supply. Combined with {@link SmlSearchConstraints} server-side — agent filters
+ * never widen the runtime-imposed constraints.
  */
 export interface SmlSearchFilters {
   /** Restrict to one or more SML types (ANY semantics; matches if `type` is in the list). */
@@ -68,7 +68,7 @@ export interface SmlSearchHttpResponse {
 export interface SmlSearchHttpResultItem {
   id: string;
   type: string;
-  origin_id: string;
+  origin: { uri: string };
   title: string;
   description?: string;
   content?: string;
@@ -96,7 +96,7 @@ export interface SmlAutocompleteHttpResponse {
 export interface SmlAutocompleteHttpResultItem {
   id: string;
   type: string;
-  origin_id: string;
+  origin: { uri: string };
   title: string;
   /**
    * The specific `discovery_labels` entries that matched the typed prefix,

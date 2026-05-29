@@ -18,7 +18,7 @@ import type {
   SmlDocument,
   SmlTypeDefinition,
   SmlSearchFilters,
-  SmlSearchScoping,
+  SmlSearchConstraints,
   MatchedDiscoveryLabel,
 } from './types';
 import { createSmlTypeRegistry, type SmlTypeRegistry } from './sml_type_registry';
@@ -88,34 +88,34 @@ class SmlServiceImpl implements SmlServiceInstance {
       search: async ({
         query,
         size = 10,
-        skipContent,
+        fields,
         spaceId,
         esClient,
         request,
-        scoping,
+        constraints,
         filters,
       }) => {
         return searchSml({
           query,
           size,
-          skipContent,
+          fields,
           spaceId,
           esClient,
           request,
           securityAuthz: this.securityAuthz,
           logger,
-          scoping,
+          constraints,
           filters,
         });
       },
-      autocomplete: async ({ query, size = 10, spaceId, esClient, request, scoping, filters }) => {
+      autocomplete: async ({ query, size = 10, spaceId, esClient, request, constraints, filters }) => {
         const rawResults = await autocompleteSml({
           query,
           size,
           spaceId,
           esClient,
           logger,
-          scoping,
+          constraints,
           filters,
         });
         return filterResultsByPermissions({
@@ -358,15 +358,11 @@ const checkItemsAccess = async ({
  */
 const MAX_SCAN_MULTIPLIER = 10;
 
-/**
- * All fields used in FORK MATCH branches: BM25 text fields first, then their
- * corresponding semantic_text multi-fields. Each field gets its own FORK branch
- * so FUSE can apply RRF across all six sub-retrievers independently.
- */
-const SML_MATCH_FIELDS = [
-  'title',
-  'description',
-  'content',
+/** BM25 text fields searched in the first FORK branch. */
+const SML_BM25_FIELDS = ['title', 'description', 'content'] as const;
+
+/** Semantic multi-fields searched in the second FORK branch. */
+const SML_SEMANTIC_FIELDS = [
   'title.semantic',
   'description.semantic',
   'content.semantic',
@@ -375,9 +371,12 @@ const SML_MATCH_FIELDS = [
 /**
  * Build an ES|QL query string + positional params array for the SML search path.
  *
- * Non-empty queries: six FORK branches (one MATCH per field, BM25 + semantic)
- * merged by FUSE with RRF. Filters are applied as WHERE clauses before FORK so
- * every branch operates on the same filtered set.
+ * Non-empty queries: two FORK branches merged by FUSE with RRF — one BM25
+ * branch (MATCH across title, description, content) and one semantic branch
+ * (MATCH across their semantic_text multi-fields). Mirrors the two-retriever
+ * structure of the old `retriever.rrf fields` DSL shorthand. Filters are
+ * applied as WHERE clauses before FORK so every branch operates on the same
+ * filtered set.
  *
  * Empty string or `*`: plain sorted scan — no FORK/FUSE, no relevance signal.
  *
@@ -396,28 +395,29 @@ const SML_MATCH_FIELDS = [
 const buildSmlEsqlQuery = ({
   query,
   size,
-  skipContent,
+  fields,
   spaceId,
-  scoping,
+  constraints,
   filters,
 }: {
   query: string;
   size: number;
-  skipContent?: boolean;
+  fields?: string[];
   spaceId: string;
-  scoping?: SmlSearchScoping;
+  constraints?: SmlSearchConstraints;
   filters?: SmlSearchFilters;
 }): { esql: string; params: unknown[] } => {
   const params: unknown[] = [];
-  const lines: string[] = [`FROM ${smlIndexName}`];
+  // METADATA is required for FUSE (which needs _id, _index, _score to compute RRF).
+  const lines: string[] = [`FROM ${smlIndexName} METADATA _id, _index, _score`];
 
   // spaces filter — MV_CONTAINS handles multi-value docs (== returns null for them)
   params.push(spaceId);
   lines.push('| WHERE MV_CONTAINS(spaces, ?)');
 
-  // runtime-imposed per-type id-allowlist scoping
-  if (scoping) {
-    for (const [typeId, criteria] of Object.entries(scoping)) {
+  // runtime-imposed per-type id-allowlist constraints
+  if (constraints) {
+    for (const [typeId, criteria] of Object.entries(constraints)) {
       if (!criteria?.ids) continue;
       if (criteria.ids.length === 0) {
         // Explicitly empty → exclude all documents of this type
@@ -453,30 +453,47 @@ const buildSmlEsqlQuery = ({
     lines.push('| SORT id ASC');
   } else {
     lines.push('| FORK');
-    for (const field of SML_MATCH_FIELDS) {
+    const bm25Conditions = SML_BM25_FIELDS.map((field) => {
       params.push(trimmed);
-      lines.push(`  (MATCH(${field}, ?))`);
-    }
+      return `MATCH(${field}, ?)`;
+    }).join(' OR ');
+    lines.push(`  (WHERE ${bm25Conditions} | LIMIT ${size * MAX_SCAN_MULTIPLIER})`);
+    const semanticConditions = SML_SEMANTIC_FIELDS.map((field) => {
+      params.push(trimmed);
+      return `MATCH(${field}, ?)`;
+    }).join(' OR ');
+    lines.push(`  (WHERE ${semanticConditions} | LIMIT ${size * MAX_SCAN_MULTIPLIER})`);
     lines.push('| FUSE');
     lines.push('| SORT _score DESC, id ASC');
   }
 
   lines.push(`| LIMIT ${size * MAX_SCAN_MULTIPLIER}`);
 
-  // Materialize the object sub-field into a flat keyword column before KEEP.
-  lines.push('| EVAL ref_uris = references.uri');
+  // description is included in the baseline (short summary, useful for triage).
+  // content, tags, references, spaces, permissions are opt-in via the fields param.
+  const DEFAULT_FIELDS = new Set(['description']);
+  const shouldKeep = (f: string) =>
+    fields !== undefined ? fields.includes(f) : DEFAULT_FIELDS.has(f);
 
+  // Materialize object sub-fields into flat columns before KEEP.
+  lines.push('| EVAL origin_uri = origin.uri');
+  if (shouldKeep('references')) {
+    lines.push('| EVAL ref_uris = references.uri');
+  }
+
+  // permissions is always fetched for server-side RBAC filtering; included in
+  // the result only when explicitly requested. spaces is purely opt-in.
   const keepCols = [
     'id',
     'type',
     'title',
-    'origin_id',
-    'description',
-    'tags',
-    'ref_uris',
-    'spaces',
+    'origin_uri',
+    ...(shouldKeep('description') ? ['description'] : []),
+    ...(shouldKeep('tags') ? ['tags'] : []),
+    ...(shouldKeep('references') ? ['ref_uris'] : []),
+    ...(shouldKeep('spaces') ? ['spaces'] : []),
     'permissions',
-    ...(skipContent ? [] : ['content']),
+    ...(shouldKeep('content') ? ['content'] : []),
   ];
   lines.push(`| KEEP ${keepCols.join(', ')}`);
 
@@ -484,25 +501,25 @@ const buildSmlEsqlQuery = ({
 };
 
 /**
- * Build an ES filter clause from runtime-imposed per-type scoping.
+ * Build an ES filter clause from runtime-imposed per-type constraints.
  *
  * For each type with an `ids` constraint, the filter returns documents that
  * either (a) match the type AND have an origin_id in the list, or (b) are
- * NOT of the constrained type. Types without scoping are unaffected.
+ * NOT of the constrained type. Types without constraints are unaffected.
  *
  * Renamed from `buildTypeFilters` to reflect the trust-boundary split
  * between runtime-imposed scope and agent-discoverable filters.
  */
-export const buildScopingFilter = (
-  scoping: SmlSearchScoping | undefined
+export const buildConstraintsFilter = (
+  constraints: SmlSearchConstraints | undefined
 ): Record<string, unknown> | undefined => {
-  if (!scoping) {
+  if (!constraints) {
     return undefined;
   }
 
   const clauses: Array<Record<string, unknown>> = [];
 
-  for (const [typeId, criteria] of Object.entries(scoping)) {
+  for (const [typeId, criteria] of Object.entries(constraints)) {
     if (!criteria?.ids) {
       continue;
     }
@@ -593,33 +610,35 @@ const isEsqlIndexMissingError = (error: unknown): boolean => {
  * permission post-filtering). Docs are filtered by Kibana RBAC and the first
  * `size` authorized results are returned.
  *
- * Non-empty queries: six FORK branches (BM25 × 3 + semantic × 3), merged by
- * FUSE with RRF. Empty string or `*`: plain sorted scan, no relevance signal.
+ * Non-empty queries: two FORK branches (BM25 over all text fields + semantic
+ * over all semantic multi-fields), merged by FUSE with RRF — mirrors the old
+ * `retriever.rrf fields` two-retriever structure. Empty string or `*`: plain
+ * sorted scan, no relevance signal.
  *
- * Filter composition: spaces (MV_CONTAINS) + scoping (runtime-imposed per-type
+ * Filter composition: spaces (MV_CONTAINS) + constraints (runtime-imposed per-type
  * id-allowlist) + agent filters — all ANDed as WHERE clauses before FORK.
  */
 const searchSml = async ({
   query,
   size,
-  skipContent,
+  fields,
   spaceId,
   esClient,
   request,
   securityAuthz,
   logger,
-  scoping,
+  constraints,
   filters,
 }: {
   query: string;
   size: number;
-  skipContent?: boolean;
+  fields?: string[];
   spaceId: string;
   esClient: IScopedClusterClient;
   request: KibanaRequest;
   securityAuthz?: AuthorizationServiceSetup;
   logger: Logger;
-  scoping?: SmlSearchScoping;
+  constraints?: SmlSearchConstraints;
   filters?: SmlSearchFilters;
 }): Promise<{ results: SmlSearchResult[] }> => {
   logger.debug(`SML search: query=${JSON.stringify(query)}, size=${size}, spaceId='${spaceId}'`);
@@ -627,9 +646,9 @@ const searchSml = async ({
   const { esql, params } = buildSmlEsqlQuery({
     query,
     size,
-    skipContent,
+    fields,
     spaceId,
-    scoping,
+    constraints,
     filters,
   });
 
@@ -655,18 +674,22 @@ const searchSml = async ({
     return Array.isArray(v) ? (v as unknown[]).filter((s) => s != null).map(String) : [String(v)];
   };
 
-  const allResults: SmlSearchResult[] = response.values.map((row) => {
-    const result: SmlSearchResult = {
+  // permissions is always in the columns for RBAC filtering; spaces only when requested.
+  type SmlSearchResultInternal = SmlSearchResult & { permissions: string[] };
+
+  const allResults: SmlSearchResultInternal[] = response.values.map((row) => {
+    const result: SmlSearchResultInternal = {
       id: String(row[colIndex.get('id')!] ?? ''),
       type: String(row[colIndex.get('type')!] ?? ''),
       title: String(row[colIndex.get('title')!] ?? ''),
-      origin_id: String(row[colIndex.get('origin_id')!] ?? ''),
-      spaces: toStringArray(row[colIndex.get('spaces')!]),
+      origin: { uri: String(row[colIndex.get('origin_uri')!] ?? '') },
       permissions: toStringArray(row[colIndex.get('permissions')!]),
     };
+    const spacesIdx = colIndex.get('spaces');
+    if (spacesIdx !== undefined) result.spaces = toStringArray(row[spacesIdx]);
 
     const contentIdx = colIndex.get('content');
-    if (!skipContent && contentIdx !== undefined) {
+    if (contentIdx !== undefined) {
       const content = row[contentIdx];
       if (content != null) result.content = String(content);
     }
@@ -690,7 +713,12 @@ const searchSml = async ({
   logger.debug(
     `SML search: scanned=${response.values.length}, authorized=${authorized.length}, size=${size}`
   );
-  return { results: authorized.slice(0, size) };
+  const includePermissions = fields !== undefined && fields.includes('permissions');
+  return {
+    results: authorized.slice(0, size).map(({ permissions, ...rest }) =>
+      includePermissions ? { ...rest, permissions } : rest
+    ),
+  };
 };
 
 /**
@@ -783,7 +811,7 @@ const autocompleteSml = async ({
   spaceId,
   esClient,
   logger,
-  scoping,
+  constraints,
   filters,
 }: {
   query: string;
@@ -791,7 +819,7 @@ const autocompleteSml = async ({
   spaceId: string;
   esClient: IScopedClusterClient;
   logger: Logger;
-  scoping?: SmlSearchScoping;
+  constraints?: SmlSearchConstraints;
   filters?: SmlSearchFilters;
 }): Promise<{ results: SmlAutocompleteResult[] }> => {
   logger.debug(
@@ -811,9 +839,9 @@ const autocompleteSml = async ({
         },
       },
     ];
-    const scopingFilter = buildScopingFilter(scoping);
-    if (scopingFilter) {
-      filterClauses.push(scopingFilter);
+    const constraintsFilter = buildConstraintsFilter(constraints);
+    if (constraintsFilter) {
+      filterClauses.push(constraintsFilter);
     }
     for (const agentClause of buildAgentFilters(filters)) {
       filterClauses.push(agentClause);
@@ -830,7 +858,7 @@ const autocompleteSml = async ({
           filter: filterClauses,
         },
       },
-      _source: ['id', 'type', 'title', 'origin_id', 'spaces', 'permissions'],
+      _source: ['id', 'type', 'title', 'origin', 'spaces', 'permissions'],
     });
 
     const results: SmlAutocompleteResult[] = response.hits.hits
@@ -841,7 +869,7 @@ const autocompleteSml = async ({
           id: source.id ?? '',
           type: source.type ?? '',
           title: source.title ?? '',
-          origin_id: source.origin_id ?? '',
+          origin: { uri: source.origin?.uri ?? '' },
           spaces: source.spaces ?? [],
           permissions: source.permissions ?? [],
         };
@@ -944,6 +972,7 @@ const getDocumentsByIds = async ({
         type: source.type ?? '',
         title: source.title ?? '',
         origin_id: source.origin_id ?? '',
+        origin: { uri: source.origin?.uri ?? '' },
         content: source.content ?? '',
         created_at: source.created_at ?? '',
         updated_at: source.updated_at ?? '',
