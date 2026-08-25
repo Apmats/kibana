@@ -92,6 +92,7 @@ export class QueryColumns {
     private readonly resourceRetriever?: ESQLCallbacks,
     private readonly options?: {
       invalidateColumnsCache?: boolean;
+      disableColumnsCache?: boolean;
     }
   ) {
     this.unmappedFieldsStrategy = getUnmappedFieldsStrategy(query.header);
@@ -139,7 +140,7 @@ export class QueryColumns {
   }
 
   private getFields = async (queryToES: string) => {
-    if (!this.options?.invalidateColumnsCache) {
+    if (!this.options?.disableColumnsCache && !this.options?.invalidateColumnsCache) {
       const cached = QueryColumns.fromCache(queryToES);
 
       if (cached) {
@@ -149,7 +150,7 @@ export class QueryColumns {
 
     const fields = await getFieldsFromES(queryToES, this.resourceRetriever);
     // Only cache non-empty results to avoid persisting failures from aborted requests
-    if (fields.length > 0) {
+    if (!this.options?.disableColumnsCache && fields.length > 0) {
       QueryColumns.setCache(queryToES, fields);
     }
     return fields;
@@ -188,9 +189,11 @@ export class QueryColumns {
       const isSource = isSourceCommand(currentCommand.name);
 
       if (isSource) {
-        // For source commands, check cache first
+        // This source shortcut only reads; cache writes are centralized in getFields.
         const queryString = BasicPrettyPrinter.print(subQuery);
-        const cachedFields = QueryColumns.fromCache(queryString);
+        const cachedFields = this.options?.disableColumnsCache
+          ? undefined
+          : QueryColumns.fromCache(queryString);
         if (cachedFields) {
           fields = cachedFields;
           continue;
