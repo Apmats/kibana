@@ -18,6 +18,13 @@ export const DEFAULT_ESQL_ATTRIBUTE = 'esql';
 export const MAX_ESQL_ATTRIBUTES = 20;
 export const MAX_VERIFIER_IDS = 20;
 
+export interface VerifyKiOptions {
+  'esql-valid-schema'?: {
+    field_verification?: 'enabled' | 'disabled';
+  };
+  [verifierId: string]: Record<string, unknown> | undefined;
+}
+
 export const VerifyKiInputSchema = z.object({
   ki: kiPartialFieldsSchema,
   esql_attributes: z
@@ -34,6 +41,21 @@ export const VerifyKiInputSchema = z.object({
     .describe(
       'Verifier ids to run. Required: no verifiers listed means no verification runs. Unknown ids are silently ignored.'
     ),
+  options: z
+    .object({
+      'esql-valid-schema': z
+        .object({
+          field_verification: z
+            .enum(['enabled', 'disabled'])
+            .optional()
+            .describe(
+              "Controls ES|QL field verification for the 'esql-valid-schema' verifier. 'enabled' (default): checks index existence and semantically validates source, pipeline, join, and ENRICH fields. 'disabled': checks index existence only."
+            ),
+        })
+        .optional(),
+    })
+    .optional()
+    .describe('Per-verifier configuration options, keyed by verifier id.'),
 });
 
 export const VerifyKiOutputSchema = z.object({
@@ -67,7 +89,7 @@ export const VerifyKiStepCommonDefinition: CommonStepDefinition<
   documentation: {
     details: i18n.translate('xpack.contextEngine.verifyKiStep.documentation.details', {
       defaultMessage:
-        'The {stepTypeId} step runs all applicable Context Engine verifiers against a knowledge indicator and returns a pass/fail result per verifier, each identified by the id listed below. Two verifiers apply to ES|QL: `esql-valid-syntax` statically validates each query without contacting the cluster, and `esql-valid-runtime` runs each query against the cluster, bounded by a row limit and using the permissions of the user running the workflow. Both read ES|QL from the attributes listed in `esql_attributes`, defaulting to `attributes.{defaultAttribute}`; a listed attribute the knowledge indicator does not carry is skipped rather than failed. If it carries none of them, no verifier applies and the step passes with empty results. Requires the Context Engine advanced setting.',
+        'The {stepTypeId} step runs applicable Context Engine verifiers and returns a pass/fail result for each one. Three verifiers apply to ES|QL: `esql-valid-syntax` performs local parsing and static language checks; `esql-valid-schema` uses cluster metadata and enrich policies without running the complete query; and `esql-valid-runtime` performs bounded query execution. Schema and runtime checks use the permissions of the workflow user, including for cross-cluster search, so authorization failures are execution errors rather than missing-resource results. Set `options.esql-valid-schema.field_verification` to `disabled` to check only index existence; it defaults to `enabled`. The verifiers read the attributes listed in `esql_attributes`, defaulting to `attributes.{defaultAttribute}`. Missing configured attributes are skipped, and if the knowledge indicator carries none, the step passes with empty results. Requires the Context Engine advanced setting.',
       values: { stepTypeId: VERIFY_KI_STEP_TYPE_ID, defaultAttribute: DEFAULT_ESQL_ATTRIBUTE },
     }),
     examples: [

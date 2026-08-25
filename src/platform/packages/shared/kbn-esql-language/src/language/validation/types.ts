@@ -36,4 +36,10 @@ export interface ValidationOptions {
    * @default false
    */
   invalidateColumnsCache?: boolean;
+  /**
+   * Disables reads from and writes to the process-wide column metadata cache.
+   * Takes precedence over `invalidateColumnsCache`.
+   * @default false
+   */
+  disableColumnsCache?: boolean;
 }

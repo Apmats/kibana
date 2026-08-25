@@ -34,6 +34,7 @@ import type { ESQLMessage } from '../../commands';
  * @param queryString - The query string to validate
  * @param callbacks - Optional callbacks for resource retrieval.
  * @param options.invalidateColumnsCache - Invalidates the columns metadata cache before validation. Has no effect if 'getColumnsFor' callback is not provided.
+ * @param options.disableColumnsCache - Disables column metadata cache reads and writes.
  *
  */
 export async function validateQuery(
