@@ -42,4 +42,10 @@ export interface ValidationOptions {
    * @default false
    */
   disableColumnsCache?: boolean;
+  /**
+   * Allows a resource callback to supply dynamically eligible, not-yet-mapped source fields.
+   * Missing callbacks preserve strict field validation.
+   * @default false
+   */
+  allowFutureFields?: boolean;
 }

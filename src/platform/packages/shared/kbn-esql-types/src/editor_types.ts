@@ -118,6 +118,25 @@ export interface ESQLFieldWithMetadata {
   };
 }
 
+/**
+ * A source field that is not mapped yet, but whose source mapping permits it to be created
+ * dynamically. Its type remains unresolved until Elasticsearch maps the field.
+ */
+export interface ESQLFutureField {
+  name: string;
+  type: 'unknown';
+  userDefined: false;
+  isFutureField: true;
+  isEcs?: false;
+  isUnmappedField?: false;
+}
+
+export interface ESQLFutureFieldResolution {
+  name: string;
+  state: 'mapped' | 'eligible' | 'blocked';
+  hasMappedAncestor: boolean;
+}
+
 enum KQLInESQLSuggestionType {
   Value = 'Value',
   Operator = 'Operator',
@@ -141,6 +160,10 @@ interface KQLInESQLSuggestion {
 export interface ESQLCallbacks {
   getSources?: CallbackFn<{}, ESQLSourceResult>;
   getColumnsFor?: CallbackFn<{ query: string }, ESQLFieldWithMetadata>;
+  getFutureFieldsFor?: CallbackFn<
+    { query: string; fieldNames: string[] },
+    ESQLFutureFieldResolution
+  >;
   getPolicies?: CallbackFn<
     {},
     { name: string; sourceIndices: string[]; matchField: string; enrichFields: string[] }

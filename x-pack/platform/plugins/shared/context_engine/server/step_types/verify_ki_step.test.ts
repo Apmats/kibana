@@ -77,6 +77,9 @@ describe('verify_ki workflow step', () => {
       values: [],
     }));
     esClient.enrich.getPolicy.mockResolvedValue(createPolicyResponse());
+    esClient.indices.getMapping.mockResolvedValue({
+      'logs-2026': { mappings: { dynamic: true } },
+    });
   });
 
   const runHandler = async (
@@ -155,6 +158,58 @@ describe('verify_ki workflow step', () => {
     });
     expect(esClient.esql.query).toHaveBeenCalled();
     expect(esClient.fieldCaps).toHaveBeenCalled();
+  });
+
+  it('allows only structurally eligible future fields in dynamic mode', async () => {
+    setContextEngineEnabled(true);
+    esClient.esql.query.mockResolvedValue({ columns: [], values: [] });
+
+    const eligible = await runHandler(
+      { attributes: { esql: 'FROM logs-* | KEEP future_field' } },
+      {
+        verifiers: [ESQL_VALID_SCHEMA_VERIFIER_ID],
+        options: { 'esql-valid-schema': { field_verification: 'dynamic' } },
+      }
+    );
+    expect(eligible).toEqual({
+      passed: true,
+      results: [{ verifier: ESQL_VALID_SCHEMA_VERIFIER_ID, passed: true }],
+    });
+
+    esClient.indices.getMapping.mockResolvedValue({
+      'logs-2026': { mappings: { dynamic: false } },
+    });
+    const rejected = await runHandler(
+      { attributes: { esql: 'FROM logs-* | KEEP future_field' } },
+      {
+        verifiers: [ESQL_VALID_SCHEMA_VERIFIER_ID],
+        options: { 'esql-valid-schema': { field_verification: 'dynamic' } },
+      }
+    );
+    expect(rejected.passed).toBe(false);
+    expect(rejected.results[0]).toEqual({
+      verifier: ESQL_VALID_SCHEMA_VERIFIER_ID,
+      passed: false,
+      reason: expect.stringContaining('future_field'),
+    });
+  });
+
+  it('still rejects a missing source in dynamic mode', async () => {
+    setContextEngineEnabled(true);
+    esClient.fieldCaps.mockRejectedValue(
+      esResponseError('index_not_found_exception', 'no such index [missing-*]', 404)
+    );
+
+    const output = await runHandler(
+      { attributes: { esql: 'FROM missing-* | KEEP future_field' } },
+      {
+        verifiers: [ESQL_VALID_SCHEMA_VERIFIER_ID],
+        options: { 'esql-valid-schema': { field_verification: 'dynamic' } },
+      }
+    );
+
+    expect(output.passed).toBe(false);
+    expect(output.results[0].reason).toContain('no such index [missing-*]');
   });
 
   it('propagates infrastructure failures raised during semantic validation', async () => {

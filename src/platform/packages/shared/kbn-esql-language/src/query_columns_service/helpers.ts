@@ -6,9 +6,22 @@
  * your election, the "Elastic License 2.0", the "GNU Affero General Public
  * License v3.0 only", or the "Server Side Public License, v 1".
  */
-import type { ESQLCallbacks, ESQLFieldWithMetadata, IndexAutocompleteItem } from '@kbn/esql-types';
-import type { ESQLAstJoinCommand, ESQLAstPromqlCommand, ESQLAstCommand } from '@elastic/esql/types';
-import { BasicPrettyPrinter, isSource, synth, Walker } from '@elastic/esql';
+import type { ESQLCallbacks, ESQLFutureField, IndexAutocompleteItem } from '@kbn/esql-types';
+import type {
+  ESQLAstItem,
+  ESQLAstJoinCommand,
+  ESQLAstPromqlCommand,
+  ESQLAstCommand,
+} from '@elastic/esql/types';
+import {
+  BasicPrettyPrinter,
+  isFunctionExpression,
+  isSource,
+  isSubQuery,
+  SOURCE_COMMANDS,
+  synth,
+  Walker,
+} from '@elastic/esql';
 import { esqlCommandRegistry, TRANSFORMATIONAL_COMMANDS } from '../..';
 import {
   UnmappedFieldsStrategy,
@@ -35,8 +48,8 @@ async function getEcsMetadata(resourceRetriever?: ESQLCallbacks) {
   }
 }
 
-function createGetJoinFields(fetchFields: (query: string) => Promise<ESQLFieldWithMetadata[]>) {
-  return (command: ESQLAstCommand): Promise<ESQLFieldWithMetadata[]> => {
+function createGetJoinFields(fetchFields: (query: string) => Promise<ESQLColumnData[]>) {
+  return (command: ESQLAstCommand): Promise<ESQLColumnData[]> => {
     const joinTarget = getLookupJoinSource(command as ESQLAstJoinCommand);
     if (joinTarget) {
       const joinFieldQuery = synth.cmd`FROM ${joinTarget}`.toString();
@@ -47,10 +60,10 @@ function createGetJoinFields(fetchFields: (query: string) => Promise<ESQLFieldWi
 }
 
 function createGetEnrichFields(
-  fetchFields: (query: string) => Promise<ESQLFieldWithMetadata[]>,
+  fetchFields: (query: string) => Promise<ESQLColumnData[]>,
   getPolicies: () => Promise<Map<string, ESQLPolicy>>
 ) {
-  return async (command: ESQLAstCommand): Promise<ESQLFieldWithMetadata[]> => {
+  return async (command: ESQLAstCommand): Promise<ESQLColumnData[]> => {
     if (!isSource(command.args[0])) {
       return [];
     }
@@ -71,17 +84,17 @@ function createGetEnrichFields(
   };
 }
 
-function createGetFromFields(fetchFields: (query: string) => Promise<ESQLFieldWithMetadata[]>) {
-  return (command: ESQLAstCommand): Promise<ESQLFieldWithMetadata[]> => {
+function createGetFromFields(fetchFields: (query: string) => Promise<ESQLColumnData[]>) {
+  return (command: ESQLAstCommand): Promise<ESQLColumnData[]> => {
     return fetchFields(BasicPrettyPrinter.command(command));
   };
 }
 
 function createGetPromqlFields(
-  fetchFields: (query: string) => Promise<ESQLFieldWithMetadata[]>,
+  fetchFields: (query: string) => Promise<ESQLColumnData[]>,
   getTimeseriesIndices?: () => Promise<{ indices: IndexAutocompleteItem[] }>
 ) {
-  return async (command: ESQLAstCommand): Promise<ESQLFieldWithMetadata[]> => {
+  return async (command: ESQLAstCommand): Promise<ESQLColumnData[]> => {
     if (command.name !== 'promql') {
       return [];
     }
@@ -109,6 +122,127 @@ export async function getFieldsFromES(query: string, resourceRetriever?: ESQLCal
     resourceRetriever?.getColumnsFor?.({ query }),
   ]);
   return enrichFieldsWithECSInfo(fieldsOfType || [], metadata);
+}
+
+export function getReferencedInputColumns(command: ESQLAstCommand): string[] {
+  const outputColumns = new Set<ESQLAstItem>();
+  Walker.walk(command, {
+    visitFunction: (node) => {
+      if (!isFunctionExpression(node)) {
+        return;
+      }
+      const output =
+        node.name === '=' ? node.args[0] : node.name === 'as' ? node.args[1] : undefined;
+      if (output && !Array.isArray(output)) {
+        outputColumns.add(output);
+      }
+    },
+    visitParens: (node, _parent, walker) => {
+      if (isSubQuery(node)) {
+        walker.skipChildren();
+      }
+    },
+  });
+
+  const names = new Set<string>();
+  Walker.walk(command, {
+    visitColumn: (node) => {
+      const name = node.parts.join('.');
+      if (!outputColumns.has(node) && name !== '*' && !name.includes('*')) {
+        names.add(name);
+      }
+    },
+    visitParens: (node, _parent, walker) => {
+      if (isSubQuery(node)) {
+        walker.skipChildren();
+      }
+    },
+  });
+  return [...names];
+}
+
+export function getApplicableSourceQueries(commands: ESQLAstCommand[]): string[] {
+  const queries = new Set<string>();
+  const commandsBeforeCurrent = commands.slice(0, -1);
+
+  for (const command of commandsBeforeCurrent) {
+    if (SOURCE_COMMANDS.has(command.name.toUpperCase())) {
+      const args = command.args.filter((arg) => Array.isArray(arg) || !isSubQuery(arg));
+      if (args.length > 0) {
+        queries.add(BasicPrettyPrinter.command({ ...command, args }));
+      }
+    }
+
+    if (command.name === 'join') {
+      const joinTarget = getLookupJoinSource(command as ESQLAstJoinCommand);
+      if (joinTarget) {
+        queries.add(synth.cmd`FROM ${joinTarget}`.toString());
+      }
+    }
+  }
+
+  return [...queries];
+}
+
+export async function getFutureFields(
+  commands: ESQLAstCommand[],
+  previousColumns: ESQLColumnData[],
+  resourceRetriever: ESQLCallbacks
+): Promise<ESQLFutureField[]> {
+  const currentCommand = commands[commands.length - 1];
+  if (!currentCommand || !resourceRetriever.getFutureFieldsFor) {
+    return [];
+  }
+
+  const previousCommands = commands.slice(0, -1);
+  if (!areNewUnmappedFieldsAllowed(previousCommands)) {
+    return [];
+  }
+
+  const existingNames = new Set(previousColumns.map(({ name }) => name));
+  const removedNames = new Set(
+    previousCommands
+      .filter(({ name }) => name === 'drop' || name === 'rename')
+      .flatMap((command) => getReferencedInputColumns(command))
+  );
+  const fieldNames = getReferencedInputColumns(currentCommand).filter(
+    (name) => !existingNames.has(name) && !removedNames.has(name)
+  );
+  if (fieldNames.length === 0) {
+    return [];
+  }
+
+  const sourceQueries = getApplicableSourceQueries(commands);
+  const sourceResolutions = await Promise.all(
+    sourceQueries.map(async (query) => ({
+      resolutions: (await resourceRetriever.getFutureFieldsFor?.({ query, fieldNames })) ?? [],
+    }))
+  );
+
+  return fieldNames.flatMap<ESQLFutureField>((name) => {
+    const resolutions = sourceResolutions.map(({ resolutions: sourceResults }) => ({
+      resolution: sourceResults.find((result) => result.name === name),
+    }));
+    const eligibleResolutions = resolutions.filter(
+      ({ resolution }) => resolution?.state === 'eligible'
+    );
+
+    if (sourceQueries.length === 1 && eligibleResolutions.length === 1) {
+      return [{ name, type: 'unknown', userDefined: false, isFutureField: true }];
+    }
+
+    if (resolutions.some(({ resolution }) => resolution?.state === 'mapped')) {
+      return [];
+    }
+
+    const resolutionsWithMappedAncestor = resolutions.filter(
+      ({ resolution }) => resolution?.hasMappedAncestor
+    );
+    return resolutionsWithMappedAncestor.length === 1 &&
+      resolutionsWithMappedAncestor[0].resolution?.state === 'eligible'
+      ? [{ name, type: 'unknown', userDefined: false, isFutureField: true }]
+      : [];
+  });
 }
 
 /**
@@ -167,11 +301,12 @@ export function getUnmappedFields(
 export async function getCurrentQueryAvailableColumns(
   commands: ESQLAstCommand[],
   previousPipeFields: ESQLColumnData[],
-  fetchFields: (query: string) => Promise<ESQLFieldWithMetadata[]>,
+  fetchFields: (query: string) => Promise<ESQLColumnData[]>,
   getPolicies: () => Promise<Map<string, ESQLPolicy>>,
   getTimeseriesIndices: () => Promise<{ indices: IndexAutocompleteItem[] }>,
   originalQueryText: string,
-  unmappedFieldsStrategy?: UnmappedFieldsStrategy
+  unmappedFieldsStrategy?: UnmappedFieldsStrategy,
+  resourceRetriever?: ESQLCallbacks
 ) {
   if (commands.length === 0) {
     return previousPipeFields;
@@ -189,6 +324,12 @@ export async function getCurrentQueryAvailableColumns(
     fromEnrich: getEnrichFields,
     fromFrom: getFromFields,
     fromPromql: getPromqlFields,
+    ...(resourceRetriever?.getFutureFieldsFor
+      ? {
+          fromFuture: (pipelineCommands, columns) =>
+            getFutureFields(pipelineCommands, columns, resourceRetriever),
+        }
+      : {}),
   };
 
   const previousCommands = commands.slice(0, -1);
@@ -199,7 +340,8 @@ export async function getCurrentQueryAvailableColumns(
     unmappedFieldsStrategy
   );
 
-  const fields = [...previousPipeFields, ...unmappedFields];
+  const futureFields = (await additionalFields.fromFuture?.(commands, previousPipeFields)) ?? [];
+  const fields = [...previousPipeFields, ...futureFields, ...unmappedFields];
 
   if (commandDef?.methods.columnsAfter) {
     return commandDef.methods.columnsAfter(

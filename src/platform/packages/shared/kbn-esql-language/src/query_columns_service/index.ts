@@ -7,11 +7,11 @@
  * License v3.0 only", or the "Server Side Public License, v 1".
  */
 import type { ESQLCallbacks, ESQLFieldWithMetadata } from '@kbn/esql-types';
-import type { ESQLAstQueryExpression } from '@elastic/esql/types';
+import type { ESQLAstCommand, ESQLAstQueryExpression } from '@elastic/esql/types';
 import { BasicPrettyPrinter, SOURCE_COMMANDS } from '@elastic/esql';
 import { UnmappedFieldsStrategy } from '../commands/registry/types';
 import { type ESQLColumnData, type ESQLPolicy } from '../commands/registry/types';
-import { getCurrentQueryAvailableColumns, getFieldsFromES } from './helpers';
+import { getCurrentQueryAvailableColumns, getFieldsFromES, getFutureFields } from './helpers';
 import { getUnmappedFieldsStrategy } from '../commands/definitions/utils/settings';
 
 export const NOT_SUGGESTED_TYPES = ['unsupported'];
@@ -93,6 +93,8 @@ export class QueryColumns {
     private readonly options?: {
       invalidateColumnsCache?: boolean;
       disableColumnsCache?: boolean;
+      allowFutureFields?: boolean;
+      validationCommand?: ESQLAstCommand;
     }
   ) {
     this.unmappedFieldsStrategy = getUnmappedFieldsStrategy(query.header);
@@ -208,7 +210,8 @@ export class QueryColumns {
         getPolicies,
         this.resourceRetriever?.getTimeseriesIndices ?? (async () => ({ indices: [] })),
         this.originalQueryText,
-        this.unmappedFieldsStrategy
+        this.unmappedFieldsStrategy,
+        this.options?.allowFutureFields ? this.resourceRetriever : undefined
       );
     }
 
@@ -239,8 +242,23 @@ export class QueryColumns {
       getPolicies,
       this.resourceRetriever?.getTimeseriesIndices ?? (async () => ({ indices: [] })),
       this.originalQueryText,
-      this.unmappedFieldsStrategy
+      this.unmappedFieldsStrategy,
+      this.options?.allowFutureFields ? this.resourceRetriever : undefined
     );
+
+    const { validationCommand } = this.options ?? {};
+    if (
+      validationCommand &&
+      this.options?.allowFutureFields &&
+      this.resourceRetriever?.getFutureFieldsFor
+    ) {
+      const futureFields = await getFutureFields(
+        [...query.commands, validationCommand],
+        availableFields,
+        this.resourceRetriever
+      );
+      return [...availableFields, ...futureFields];
+    }
 
     return availableFields;
   }

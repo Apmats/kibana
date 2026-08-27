@@ -91,15 +91,16 @@ export const createEsqlValidSchemaVerifier = (): KiVerifier => ({
       const { source, query } = queryRef;
       try {
         const validationCallbacks =
-          fieldVerification === 'enabled'
-            ? callbacks
-            : {
+          fieldVerification === 'disabled'
+            ? {
                 getColumnsFor: callbacks.getColumnsFor,
-              };
+              }
+            : callbacks;
         const { errors } = await validateQuery(forceSourceResolution(query), validationCallbacks, {
           disableColumnsCache: true,
+          allowFutureFields: fieldVerification === 'dynamic',
         });
-        if (fieldVerification === 'enabled' && errors.length > 0) {
+        if (fieldVerification !== 'disabled' && errors.length > 0) {
           failures.push(
             `${source}: ES|QL query "${previewQuery(query)}" is invalid: ${errors
               .map((error) => ('text' in error ? error.text : error.message))
