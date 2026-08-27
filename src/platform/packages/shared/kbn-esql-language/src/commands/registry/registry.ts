@@ -7,7 +7,6 @@
  * License v3.0 only", or the "Server Side Public License, v 1".
  */
 import type { LicenseType } from '@kbn/licensing-types';
-import type { ESQLFieldWithMetadata } from '@kbn/esql-types';
 import type { ESQLCommand, ESQLAstAllCommands } from '@elastic/esql/types';
 import type {
   ISuggestionItem,
@@ -160,10 +159,14 @@ export interface ICommandRegistry {
 }
 
 export interface IAdditionalFields {
-  fromJoin: (cmd: ESQLCommand) => Promise<ESQLFieldWithMetadata[]>;
-  fromEnrich: (cmd: ESQLCommand) => Promise<ESQLFieldWithMetadata[]>;
-  fromFrom: (cmd: ESQLCommand) => Promise<ESQLFieldWithMetadata[]>;
-  fromPromql?: (cmd: ESQLCommand) => Promise<ESQLFieldWithMetadata[]>;
+  fromJoin: (cmd: ESQLCommand) => Promise<ESQLColumnData[]>;
+  fromEnrich: (cmd: ESQLCommand) => Promise<ESQLColumnData[]>;
+  fromFrom: (cmd: ESQLCommand) => Promise<ESQLColumnData[]>;
+  fromPromql?: (cmd: ESQLCommand) => Promise<ESQLColumnData[]>;
+  fromFuture?: (
+    commands: ESQLCommand[],
+    previousColumns: ESQLColumnData[]
+  ) => Promise<ESQLColumnData[]>;
 }
 
 /**

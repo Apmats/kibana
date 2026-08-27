@@ -35,6 +35,7 @@ import type { ESQLMessage } from '../../commands';
  * @param callbacks - Optional callbacks for resource retrieval.
  * @param options.invalidateColumnsCache - Invalidates the columns metadata cache before validation. Has no effect if 'getColumnsFor' callback is not provided.
  * @param options.disableColumnsCache - Disables column metadata cache reads and writes.
+ * @param options.allowFutureFields - Allows getFutureFieldsFor to supply unresolved source fields.
  *
  */
 export async function validateQuery(
@@ -138,7 +139,13 @@ async function validateAst(
         : queryString;
 
     const columns = shouldValidateCallback(callbacks, 'getColumnsFor')
-      ? await new QueryColumns(subqueryForColumns, queryForColumns, callbacks, options).asMap()
+      ? await new QueryColumns(subqueryForColumns, queryForColumns, callbacks, {
+          ...options,
+          validationCommand:
+            currentCommand.name === 'join' || currentCommand.name === 'promql'
+              ? undefined
+              : currentCommand,
+        }).asMap()
       : new Map();
 
     const references: ReferenceMaps = {

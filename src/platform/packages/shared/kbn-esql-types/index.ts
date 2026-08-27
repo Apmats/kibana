@@ -77,6 +77,8 @@ export {
   type ESQLCallbacks,
   type PartialFieldsMetadataClient,
   type ESQLFieldWithMetadata,
+  type ESQLFutureField,
+  type ESQLFutureFieldResolution,
   type EsqlFieldType,
   esqlFieldTypes,
   KQL_TYPE_TO_KIND_MAP,

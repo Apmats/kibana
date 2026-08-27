@@ -50,13 +50,16 @@ async function processSubquery(
   let columns: ESQLColumnData[] = [];
 
   // Execute each command in subquery pipeline: FROM index | KEEP
-  for (const subCommand of subquery.commands) {
+  for (let i = 0; i < subquery.commands.length; i++) {
+    const subCommand = subquery.commands[i];
     const commandDef = esqlCommandRegistry.getCommandByName(subCommand.name);
 
     if (commandDef?.methods?.columnsAfter) {
+      const futureFields =
+        (await additionalFields.fromFuture?.(subquery.commands.slice(0, i + 1), columns)) ?? [];
       columns = await commandDef.methods.columnsAfter(
         subCommand,
-        columns,
+        [...columns, ...futureFields],
         query,
         additionalFields,
         unmappedFieldsStrategy

@@ -31,6 +31,27 @@ describe('VerifyKiInputSchema', () => {
     expect(result.success).toBe(true);
   });
 
+  it.each(['enabled', 'dynamic', 'disabled'] as const)(
+    'accepts field_verification mode %s',
+    (fieldVerification) => {
+      const result = VerifyKiInputSchema.safeParse({
+        ki: { type: 'detection' },
+        options: { 'esql-valid-schema': { field_verification: fieldVerification } },
+      });
+
+      expect(result.success).toBe(true);
+    }
+  );
+
+  it('rejects an unknown field_verification mode', () => {
+    const result = VerifyKiInputSchema.safeParse({
+      ki: { type: 'detection' },
+      options: { 'esql-valid-schema': { field_verification: 'permissive' } },
+    });
+
+    expect(result.success).toBe(false);
+  });
+
   it('rejects attributes with too many entries', () => {
     const attributes = Object.fromEntries(
       Array.from({ length: MAX_KI_ATTRIBUTES + 1 }, (_, i) => [`key${i}`, 'v'])

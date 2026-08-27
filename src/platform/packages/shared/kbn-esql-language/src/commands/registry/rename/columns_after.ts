@@ -41,6 +41,9 @@ export const columnsAfter = (
         type: oldColumn.type,
         location: asRenamePair.args[1].location,
         userDefined: true,
+        ...('isFutureField' in oldColumn && oldColumn.isFutureField
+          ? { isFutureField: true as const }
+          : {}),
       };
     }
 
@@ -54,6 +57,9 @@ export const columnsAfter = (
         type: oldColumn.type,
         location: assignRenamePair.args[0].location,
         userDefined: true,
+        ...('isFutureField' in oldColumn && oldColumn.isFutureField
+          ? { isFutureField: true as const }
+          : {}),
       };
     }
 

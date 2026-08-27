@@ -13,6 +13,7 @@ import type {
   ESQLControlVariable,
   ESQLSourceResult,
   ESQLFieldWithMetadata,
+  ESQLFutureField,
   ESQLCallbacks,
   EsqlView,
   EsqlDataset,
@@ -142,9 +143,10 @@ export interface ESQLUserDefinedColumn {
   userDefined: true;
   location: ESQLLocation; // TODO should this be optional?
   isUnmappedField?: boolean;
+  isFutureField?: boolean;
 }
 
-export type ESQLColumnData = ESQLUserDefinedColumn | ESQLFieldWithMetadata;
+export type ESQLColumnData = ESQLUserDefinedColumn | ESQLFieldWithMetadata | ESQLFutureField;
 
 export interface ESQLCommandSummary {
   /**

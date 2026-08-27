@@ -21,6 +21,12 @@ const createEsqlResponse = (fields: Record<string, string>): estypes.EsqlQueryRe
   values: [],
 });
 
+const createMappingResponse = (
+  mapping: estypes.MappingTypeMapping
+): estypes.IndicesGetMappingResponse => ({
+  'logs-2026': { mappings: mapping },
+});
+
 const createPolicyResponse = (
   enrichFields: string[],
   type: 'match' | 'range' | 'geo_match' = 'match'
@@ -354,6 +360,74 @@ describe('esql-valid-schema verifier', () => {
     expect(outcome).toEqual({
       passed: false,
       reason: expect.stringContaining('no such index [missing-*]'),
+    });
+  });
+
+  it('allows an absent field only when its mapping permits dynamic creation', async () => {
+    esClient.esql.query.mockResolvedValue(createEsqlResponse({}));
+    esClient.indices.getMapping.mockResolvedValue(createMappingResponse({ dynamic: true }));
+    const dynamicContext: KiVerifierContext = {
+      ...context,
+      options: { 'esql-valid-schema': { field_verification: 'dynamic' } },
+    };
+
+    await expect(
+      verifier.verify(makeKi('FROM logs-* | KEEP future_field'), dynamicContext)
+    ).resolves.toEqual({ passed: true });
+
+    esClient.indices.getMapping.mockResolvedValue(createMappingResponse({ dynamic: false }));
+    const rejected = await verifier.verify(
+      makeKi('FROM logs-* | KEEP future_field'),
+      dynamicContext
+    );
+    expect(rejected).toEqual({
+      passed: false,
+      reason: expect.stringContaining('future_field'),
+    });
+  });
+
+  it('does not weaken known-field type validation in dynamic mode', async () => {
+    esClient.esql.query.mockResolvedValue(createEsqlResponse({ known_long: 'long' }));
+    esClient.indices.getMapping.mockResolvedValue(createMappingResponse({ dynamic: true }));
+
+    const outcome = await verifier.verify(
+      makeKi('FROM logs-* | EVAL result = TO_UPPER(known_long)'),
+      {
+        ...context,
+        options: { 'esql-valid-schema': { field_verification: 'dynamic' } },
+      }
+    );
+
+    expect(outcome).toEqual({
+      passed: false,
+      reason: expect.stringContaining('TO_UPPER'),
+    });
+    expect(esClient.indices.getMapping).not.toHaveBeenCalled();
+  });
+
+  it('still reports missing sources and ENRICH policies in dynamic mode', async () => {
+    const dynamicContext: KiVerifierContext = {
+      ...context,
+      options: { 'esql-valid-schema': { field_verification: 'dynamic' } },
+    };
+    esClient.fieldCaps.mockRejectedValueOnce(
+      esResponseError('index_not_found_exception', 'no such index [missing-*]')
+    );
+    await expect(
+      verifier.verify(makeKi('FROM missing-* | KEEP future_field'), dynamicContext)
+    ).resolves.toEqual({
+      passed: false,
+      reason: expect.stringContaining('no such index [missing-*]'),
+    });
+
+    esClient.enrich.getPolicy.mockResolvedValue({ policies: [] });
+    const missingPolicy = await verifier.verify(
+      makeKi('FROM logs-* | ENRICH missing_policy ON client.ip'),
+      dynamicContext
+    );
+    expect(missingPolicy).toEqual({
+      passed: false,
+      reason: expect.stringContaining('missing_policy'),
     });
   });
 
